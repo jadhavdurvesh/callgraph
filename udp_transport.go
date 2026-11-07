@@ -170,7 +170,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	if err != nil { return nil, err }
 	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
 	if err != nil { return nil, err }
-	wirePayload := octets
+	wirePayload = octets
 	if len(c.config.PreSharedKey) == 32 {
 		wirePayload, err = sealSecurePayload(c.config.PreSharedKey, session, 1, false, octets)
 		if err != nil { return nil, err }
@@ -198,7 +198,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	envelope, err := decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
 	if envelope.session != session || envelope.sequence != 1 { return nil, ErrMalformedDatagram }
-	wirePayload := envelope.payload
+	wirePayload = envelope.payload
 	if len(c.config.PreSharedKey) == 32 {
 		wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 1, true, wirePayload)
 		if err != nil { return nil, err }
