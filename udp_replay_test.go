@@ -40,3 +40,20 @@ func TestUDPReplayWindowExpiresEntriesAndEnforcesCapacity(t *testing.T) {
 	time.Sleep(3 * time.Millisecond)
 	if accepted, _ := server.acceptReplay(datagramEnvelope{session: 2, sequence: 1}); !accepted { t.Fatal("expired entry must be evicted") }
 }
+
+func TestUDPReplayResponseCacheHasByteBudget(t *testing.T) {
+	cfg := DefaultUDPConfig()
+	cfg.MaxReplayBytes = 5
+	server := &UDPServer{config: cfg, replay: make(map[replayKey]replayEntry)}
+	first := datagramEnvelope{session: 1, sequence: 1}
+	second := datagramEnvelope{session: 2, sequence: 1}
+	if ok, _ := server.acceptReplay(first); !ok { t.Fatal("first packet rejected") }
+	if ok, _ := server.acceptReplay(second); !ok { t.Fatal("second packet rejected") }
+	server.storeReplayResponse(first, []byte("12345"))
+	server.storeReplayResponse(second, []byte("67890"))
+	if server.replayBytes != 5 { t.Fatalf("cached %d bytes, want 5", server.replayBytes) }
+	_, cachedFirst := server.acceptReplay(first)
+	if len(cachedFirst) != 5 { t.Fatalf("first response should remain cached: %q", cachedFirst) }
+	_, cachedSecond := server.acceptReplay(second)
+	if len(cachedSecond) != 0 { t.Fatalf("second response should not exceed cache budget: %q", cachedSecond) }
+}
