@@ -10,7 +10,8 @@
 - [x] Bounded retransmission, duplicate suppression and cached response replay.
 - [x] Initial structured error payload and stable remote error codes (1001–1005, 1500).
 - [ ] Cancellation propagation beyond the server-side handler context.
-- [ ] Congestion control, MTU discovery and fair scheduling.
+- [x] ACK1 codec with shared Rust/Go golden wire vector.
+- [ ] Integrate ACK generation/processing, congestion control, MTU discovery and fair scheduling.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
 - [ ] Streaming/backpressure profile, fuzzing and benchmarks.
 
