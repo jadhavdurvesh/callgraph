@@ -1,29 +1,40 @@
 # CALLGRAPH
 
-**A research-oriented remote procedure execution runtime.**
+CALLGRAPH is a typed remote-operation runtime. Its UDP profile transports CALLGRAPH frames inside OCTET serialization frames inside DATAGRAM envelopes.
 
-CALLGRAPH defines typed remote operations, request/response envelopes, deadlines, cancellation, identity and authorization hooks, and bounded execution behavior across process boundaries.
+## Wire stack
 
-## Design boundaries
+`CGR1 → OCT1 → DGM1 → UDP/IP`
 
-- Own remote invocation semantics, method registration, request correlation, deadlines, cancellation, and error taxonomy.
-- Keep payload encoding in OCTET through a codec interface.
-- Keep network I/O in DATAGRAM or another explicitly selected transport adapter.
-- Keep application-level HTTP routing in CONTRACT.
-- Do not use remote calls for hard real-time control loops or emergency-stop dependencies.
+## Current transport capabilities
 
-## Initial implementation
+- Bounded datagram and application payload sizes.
+- Bounded concurrent operation execution.
+- Per-session sequence replay rejection with bounded cache.
+- Cached responses for duplicate requests, enabling safe retransmission without re-executing a completed operation.
+- Configurable bounded retries and request deadlines.
+- Optional AES-256-GCM authenticated encryption using a 32-byte pre-shared key.
+- Separate nonce domains for request and response directions.
 
-- Language: Go.
-- Initial scope: transport-independent invocation registry, request validation, context-aware dispatch, and tests.
-- Later work: OCTET codec adapter, DATAGRAM transport adapter, authentication/authorization, replay protection, and streaming semantics.
+## Enabling encryption
 
-## Status
+Configure both peers with the same 32-byte key. For the interoperability server:
 
-Early development. The initial runtime is not yet a networked RPC implementation.
+```sh
+export CALLGRAPH_PSK_HEX="$(openssl rand -hex 32)"
+go run ./cmd/interop-server
+```
 
-## Related technologies
+The client must be provisioned with the same key through a secret manager or protected configuration. Do not commit keys to source control, logs, or CI artifacts. `RequireEncryption` rejects unencrypted requests when no key is present.
 
-- [CONTRACT](https://github.com/jadhavdurvesh/contract) — API framework.
-- [OCTET](https://github.com/jadhavdurvesh/octet) — binary data protocol.
-- [DATAGRAM](https://github.com/jadhavdurvesh/datagram) — datagram networking.
+The current profile uses a 64-bit random session identifier and a 31-bit sequence space per direction. Rotate pre-shared keys periodically and cap the number of sessions per key. This is a PSK profile, not a public-key handshake or certificate infrastructure.
+
+## Limitations
+
+This is a research implementation, not yet a production transport standard. It does not yet implement congestion control, path MTU discovery, key rotation negotiation, forward secrecy, certificate-based identity, or a formal threat-model review. Retransmission is bounded and response caching is in-memory. UDP overload can cause packet drops. Do not use it for hard real-time or emergency-stop control.
+
+## Repositories
+
+- [CONTRACT](https://github.com/jadhavdurvesh/contract) — API and HTTP application layer.
+- [OCTET](https://github.com/jadhavdurvesh/octet) — binary serialization profile.
+- [DATAGRAM](https://github.com/jadhavdurvesh/datagram) — UDP endpoint and envelope primitives.
