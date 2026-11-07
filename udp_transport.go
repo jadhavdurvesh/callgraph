@@ -265,6 +265,11 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		packet := append([]byte(nil), buf[:n]...)
 		envelope, decodeErr := decodeDatagram(packet, s.config.MaxDatagramBytes)
 		if decodeErr != nil { continue }
+		// Authenticate encrypted packets before allowing them to consume replay-cache
+		// capacity; otherwise unauthenticated traffic could exhaust the bounded cache.
+		if len(s.config.PreSharedKey) == 32 {
+			if _, authErr := openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, envelope.payload); authErr != nil { continue }
+		} else if s.config.RequireEncryption { continue }
 		accepted, cached := s.acceptReplay(envelope)
 		if !accepted {
 			if len(cached) > 0 { _, _ = conn.WriteToUDP(cached, peer) }
