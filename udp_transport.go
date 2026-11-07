@@ -35,14 +35,16 @@ type UDPConfig struct {
 	MaxDatagramBytes int
 	RequestTimeout time.Duration
 	ReadPollInterval time.Duration
+	MaxConcurrentRequests int
+	MaxReplayEntries int
 }
 
 func DefaultUDPConfig() UDPConfig {
-	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond}
+	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond, MaxConcurrentRequests: 128, MaxReplayEntries: 8192}
 }
 
 func (c UDPConfig) validate() error {
-	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 {
+	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 {
 		return errors.New("callgraph: invalid UDP transport limits")
 	}
 	if c.MaxPayloadBytes+datagramHeaderSize+octetHeaderSize+FrameHeaderSize > c.MaxDatagramBytes {
@@ -161,17 +163,23 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 }
 
 // UDPServer dispatches registered CALLGRAPH operations over the shared wire profiles.
+type replayKey struct { session uint64; sequence uint64 }
+
 type UDPServer struct {
 	runtime *Runtime
 	config UDPConfig
 	mu sync.RWMutex
 	operations map[uint32]Descriptor
+	replayMu sync.Mutex
+	replay map[replayKey]time.Time
+	workers chan struct{}
+	wg sync.WaitGroup
 }
 
 func NewUDPServer(runtime *Runtime, config UDPConfig) (*UDPServer, error) {
 	if runtime == nil { return nil, errors.New("callgraph: runtime is required") }
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor)}, nil
+	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]time.Time), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
 }
 
 func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handler Handler) error {
@@ -198,9 +206,39 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			return err
 		}
 		if n > s.config.MaxDatagramBytes { continue }
-		response := s.handlePacket(ctx, buf[:n])
-		if len(response) > 0 { _, _ = conn.WriteToUDP(response, peer) }
+		packet := append([]byte(nil), buf[:n]...)
+		envelope, decodeErr := decodeDatagram(packet, s.config.MaxDatagramBytes)
+		if decodeErr != nil || !s.acceptReplay(envelope) { continue }
+		select {
+		case s.workers <- struct{}{}:
+			s.wg.Add(1)
+			go func(peer *net.UDPAddr, packet []byte) {
+				defer s.wg.Done()
+				defer func(){ <-s.workers }()
+				if response := s.handlePacket(ctx, packet); len(response) > 0 {
+					_, _ = conn.WriteToUDP(response, peer)
+				}
+			}(peer, packet)
+		default:
+			// Bounded overload policy: drop excess datagrams rather than queue
+			// unbounded work or block the socket reader.
+		}
 	}
+	s.wg.Wait()
+}
+
+func (s *UDPServer) acceptReplay(envelope datagramEnvelope) bool {
+	now := time.Now()
+	key := replayKey{session: envelope.session, sequence: envelope.sequence}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	if expiry, exists := s.replay[key]; exists && now.Before(expiry) { return false }
+	if len(s.replay) >= s.config.MaxReplayEntries {
+		for k, expiry := range s.replay { if !now.Before(expiry) { delete(s.replay, k) } }
+		if len(s.replay) >= s.config.MaxReplayEntries { return false }
+	}
+	s.replay[key] = now.Add(2 * s.config.RequestTimeout)
+	return true
 }
 
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
