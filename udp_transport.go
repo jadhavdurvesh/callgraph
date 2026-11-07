@@ -53,7 +53,9 @@ func (c UDPConfig) validate() error {
 	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {}
 		return errors.New("callgraph: invalid UDP transport limits")
 	}
-	if c.MaxPayloadBytes+datagramHeaderSize+octetHeaderSize+FrameHeaderSize > c.MaxDatagramBytes {
+	overhead := datagramHeaderSize + octetHeaderSize + FrameHeaderSize
+	if len(c.PreSharedKey) == 32 { overhead += 20 }
+	if c.MaxPayloadBytes+overhead > c.MaxDatagramBytes {
 		return errors.New("callgraph: payload limit exceeds datagram limit")
 	}
 	return nil
@@ -166,7 +168,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 
 	frame, err := EncodeFrame(Frame{Kind: kindRequest, RequestID: requestID, OperationID: operationID, Major: major, Minor: minor, DeadlineMillis: durationMillis(budget), Payload: payload}, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
-	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize)
+	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-20IfEncrypted(c.config.PreSharedKey))
 	if err != nil { return nil, err }
 	wirePayload := octets
 	if len(c.config.PreSharedKey) == 32 {
@@ -348,7 +350,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	}
 	responseFrame, err := EncodeFrame(Frame{Kind: kind, RequestID: request.RequestID, OperationID: request.OperationID, Major: request.Major, Minor: request.Minor, Payload: result}, s.config.MaxPayloadBytes)
 	if err != nil { return nil }
-	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize)
+	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-20IfEncrypted(s.config.PreSharedKey))
 	if err != nil { return nil }
 	wirePayload := octets
 	if len(s.config.PreSharedKey) == 32 {
@@ -359,6 +361,8 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	if err != nil { return nil }
 	return response
 }
+
+func 20IfEncrypted(key []byte) int { if len(key)==32 { return 20 }; return 0 }
 
 func durationMillis(d time.Duration) uint32 {
 	ms := d / time.Millisecond
