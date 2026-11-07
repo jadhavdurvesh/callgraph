@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log"
 	"net"
 	"os"
@@ -33,7 +34,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	server, err := callgraph.NewUDPServer(runtime, callgraph.DefaultUDPConfig())
+	transportConfig := callgraph.DefaultUDPConfig()
+	if encodedKey := os.Getenv("CALLGRAPH_PSK_HEX"); encodedKey != "" {
+		key, decodeErr := hex.DecodeString(encodedKey)
+		if decodeErr != nil || len(key) != 32 { log.Fatal("CALLGRAPH_PSK_HEX must contain exactly 32 bytes encoded as 64 hex characters") }
+		transportConfig.PreSharedKey = key
+		transportConfig.RequireEncryption = true
+	}
+	server, err := callgraph.NewUDPServer(runtime, transportConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
