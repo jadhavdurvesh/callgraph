@@ -38,7 +38,7 @@ type UDPConfig struct {
 }
 
 func DefaultUDPConfig() UDPConfig {
-	return UDPConfig{MaxPayloadBytes: 64 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond}
+	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond}
 }
 
 func (c UDPConfig) validate() error {
