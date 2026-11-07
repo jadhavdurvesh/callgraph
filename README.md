@@ -14,6 +14,7 @@ CALLGRAPH is a typed remote-operation runtime. Its UDP profile transports CALLGR
 - Cached responses for duplicate requests, enabling safe retransmission without re-executing a completed operation.
 - Configurable bounded retries and request deadlines. Retransmission is opt-in through `CallOptions{RetrySafe: true}`; only use it for operations safe to repeat.
 - Stable structured remote error codes: 1001 method missing, 1002 major-version mismatch, 1003 unauthorized, 1004 deadline exceeded, 1005 payload limit, and 1500 internal error.
+- ACK1 codec interoperable with the Rust DATAGRAM implementation, with up to eight bounded acknowledgement ranges. The codec is not yet connected to the UDP request/response scheduler.
 - Optional AES-256-GCM authenticated encryption using a 32-byte pre-shared key.
 - Separate nonce domains for request and response directions.
 
