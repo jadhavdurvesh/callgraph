@@ -2,6 +2,8 @@ package callgraph
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -39,6 +41,8 @@ type UDPConfig struct {
 	MaxReplayEntries int
 	MaxRetries int
 	RetryInterval time.Duration
+	PreSharedKey []byte
+	RequireEncryption bool
 }
 
 func DefaultUDPConfig() UDPConfig {
@@ -46,7 +50,7 @@ func DefaultUDPConfig() UDPConfig {
 }
 
 func (c UDPConfig) validate() error {
-	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 {}
+	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {}
 		return errors.New("callgraph: invalid UDP transport limits")
 	}
 	if c.MaxPayloadBytes+datagramHeaderSize+octetHeaderSize+FrameHeaderSize > c.MaxDatagramBytes {
@@ -101,6 +105,37 @@ func decodeDatagram(wire []byte, max int) (datagramEnvelope, error) {
 	return out, nil
 }
 
+
+// sealSecurePayload applies AES-256-GCM to a complete OCTET frame. The 96-bit
+// nonce is session || (sequence with response-direction bit); sequence values
+// are restricted to 31 bits to keep request and response nonces disjoint.
+func sealSecurePayload(key []byte, session uint64, sequence uint64, response bool, plaintext []byte) ([]byte, error) {
+	if len(key) != 32 || sequence > 0x7fffffff { return nil, ErrMalformedDatagram }
+	block, err := aes.NewCipher(key); if err != nil { return nil, err }
+	aead, err := cipher.NewGCM(block); if err != nil { return nil, err }
+	var nonce [12]byte
+	binary.BigEndian.PutUint64(nonce[:8], session)
+	seq := uint32(sequence); if response { seq |= 0x80000000 }
+	binary.BigEndian.PutUint32(nonce[8:], seq)
+	var aad [12]byte
+	copy(aad[:], nonce[:])
+	sealed := aead.Seal(nil, nonce[:], plaintext, aad[:])
+	out := make([]byte, 4+len(sealed)); copy(out[:4], "SEC1"); copy(out[4:], sealed)
+	return out, nil
+}
+
+func openSecurePayload(key []byte, session uint64, sequence uint64, response bool, wire []byte) ([]byte, error) {
+	if len(key) != 32 || sequence > 0x7fffffff || len(wire) < 4+16 || string(wire[:4]) != "SEC1" { return nil, ErrMalformedDatagram }
+	block, err := aes.NewCipher(key); if err != nil { return nil, err }
+	aead, err := cipher.NewGCM(block); if err != nil { return nil, err }
+	var nonce [12]byte
+	binary.BigEndian.PutUint64(nonce[:8], session)
+	seq := uint32(sequence); if response { seq |= 0x80000000 }
+	binary.BigEndian.PutUint32(nonce[8:], seq)
+	var aad [12]byte; copy(aad[:], nonce[:])
+	return aead.Open(nil, nonce[:], wire[4:], aad[:])
+}
+
 // UDPClient sends CALLGRAPH frames inside OCTET frames inside DATAGRAM envelopes.
 type UDPClient struct { config UDPConfig }
 
@@ -133,7 +168,12 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	if err != nil { return nil, err }
 	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize)
 	if err != nil { return nil, err }
-	packet, err := encodeDatagram(session, 1, octets, c.config.MaxDatagramBytes)
+	wirePayload := octets
+	if len(c.config.PreSharedKey) == 32 {
+		wirePayload, err = sealSecurePayload(c.config.PreSharedKey, session, 1, false, octets)
+		if err != nil { return nil, err }
+	}
+	packet, err := encodeDatagram(session, 1, wirePayload, c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
 
 	deadline := time.Now().Add(budget)
@@ -156,7 +196,12 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	envelope, err := decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
 	if envelope.session != session || envelope.sequence != 1 { return nil, ErrMalformedDatagram }
-	rpcWire, err := decodeOCTET(envelope.payload, c.config.MaxDatagramBytes)
+	wirePayload := envelope.payload
+	if len(c.config.PreSharedKey) == 32 {
+		wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 1, true, wirePayload)
+		if err != nil { return nil, err }
+	}
+	rpcWire, err := decodeOCTET(wirePayload, c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
 	response, err := DecodeFrame(rpcWire, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
@@ -272,7 +317,12 @@ func (s *UDPServer) storeReplayResponse(envelope datagramEnvelope, response []by
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	envelope, err := decodeDatagram(packet, s.config.MaxDatagramBytes)
 	if err != nil { return nil }
-	rpcWire, err := decodeOCTET(envelope.payload, s.config.MaxDatagramBytes)
+	wirePayload := envelope.payload
+	if len(s.config.PreSharedKey) == 32 {
+		wirePayload, err = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, wirePayload)
+		if err != nil { return nil }
+	} else if s.config.RequireEncryption { return nil }
+	rpcWire, err := decodeOCTET(wirePayload, s.config.MaxDatagramBytes)
 	if err != nil { return nil }
 	request, err := DecodeFrame(rpcWire, s.config.MaxPayloadBytes)
 	if err != nil || request.Kind != kindRequest || request.OperationID == 0 { return nil }
@@ -300,7 +350,12 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	if err != nil { return nil }
 	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize)
 	if err != nil { return nil }
-	response, err := encodeDatagram(envelope.session, envelope.sequence, octets, s.config.MaxDatagramBytes)
+	wirePayload := octets
+	if len(s.config.PreSharedKey) == 32 {
+		wirePayload, err = sealSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, true, octets)
+		if err != nil { return nil }
+	}
+	response, err := encodeDatagram(envelope.session, envelope.sequence, wirePayload, s.config.MaxDatagramBytes)
 	if err != nil { return nil }
 	return response
 }
