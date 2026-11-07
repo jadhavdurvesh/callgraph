@@ -13,6 +13,7 @@ CALLGRAPH is a typed remote-operation runtime. Its UDP profile transports CALLGR
 - Per-session sequence replay rejection with bounded cache.
 - Cached responses for duplicate requests, enabling safe retransmission without re-executing a completed operation.
 - Configurable bounded retries and request deadlines.
+README.md
 - Optional AES-256-GCM authenticated encryption using a 32-byte pre-shared key.
 - Separate nonce domains for request and response directions.
 
