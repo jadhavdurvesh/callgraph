@@ -8,7 +8,7 @@
 - [x] UDP client/server with bounded payloads and concurrent workers.
 - [x] Optional AES-256-GCM PSK protection shared with the Rust CONTRACT client.
 - [x] Bounded retransmission, duplicate suppression and cached response replay.
-- [ ] Structured, typed error catalogue and stable error codes.
+- [x] Initial structured error payload and stable remote error codes (1001–1005, 1500).
 - [ ] Cancellation propagation beyond the server-side handler context.
 - [ ] Congestion control, MTU discovery and fair scheduling.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
