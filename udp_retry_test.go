@@ -54,7 +54,7 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 	clientConfig.RetryInterval=30*time.Millisecond
 	clientConfig.MaxRetries=2
 	client,err:=NewUDPClient(clientConfig);if err!=nil{t.Fatal(err)}
-	got,err:=client.Call(context.Background(),proxy.LocalAddr().String(),91,1,0,[]byte("hello"))
+	got,err:=client.CallWithOptions(context.Background(),proxy.LocalAddr().String(),91,1,0,[]byte("hello"),CallOptions{RetrySafe:true})
 	if err!=nil{t.Fatal(err)}
 	if string(got)!="ack:hello"{t.Fatalf("response %q",got)}
 	if err:=<-proxyDone;err!=nil{t.Fatal(err)}
