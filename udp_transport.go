@@ -227,7 +227,9 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	case kindResponse:
 		return response.Payload, nil
 	case kindError:
-		return nil, fmt.Errorf("%w: %s", ErrRemoteOperation, string(response.Payload))
+		code, message, decodeErr := DecodeErrorPayload(response.Payload)
+		if decodeErr != nil { return nil, decodeErr }
+		return nil, &RemoteError{Code: code, Message: message}
 	default:
 		return nil, ErrUnexpectedMessage
 	}
@@ -362,17 +364,24 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	var result []byte
 	if !exists {
 		kind = kindError
-		result = []byte(ErrMethodNotFound.Error())
+		result = encodeErrorPayload(ErrorCodeMethodNotFound, ErrMethodNotFound.Error())
 	} else if descriptor.Major != request.Major {
 		kind = kindError
-		result = []byte(ErrOperationVersion.Error())
+		result = encodeErrorPayload(ErrorCodeOperationVersion, ErrOperationVersion.Error())
 	} else {
 		budget := time.Duration(request.DeadlineMillis) * time.Millisecond
 		if budget <= 0 || budget > descriptor.MaxDeadline { budget = descriptor.MaxDeadline }
 		ctx, cancel := context.WithTimeout(parent, budget)
 		result, err = s.runtime.InvokeOperation(ctx, descriptor, request.Payload)
 		cancel()
-		if err != nil { kind = kindError; result = []byte(err.Error()) }
+		if err != nil {
+			kind = kindError
+			code := ErrorCodeInternal
+			if errors.Is(err, ErrUnauthorized) { code = ErrorCodeUnauthorized }
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrDeadlineExceeded) { code = ErrorCodeDeadlineExceeded }
+			if errors.Is(err, ErrPayloadTooLarge) { code = ErrorCodePayloadLimit }
+			result = encodeErrorPayload(code, err.Error())
+		}
 	}
 	responseFrame, err := EncodeFrame(Frame{Kind: kind, RequestID: request.RequestID, OperationID: request.OperationID, Major: request.Major, Minor: request.Minor, Payload: result}, s.config.MaxPayloadBytes)
 	if err != nil { return nil }
