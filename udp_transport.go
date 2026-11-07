@@ -357,7 +357,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	if err != nil { return nil }
 	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(s.config.PreSharedKey))
 	if err != nil { return nil }
-	wirePayload := octets
+	wirePayload = octets
 	if len(s.config.PreSharedKey) == 32 {
 		wirePayload, err = sealSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, true, octets)
 		if err != nil { return nil }
