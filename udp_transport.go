@@ -187,12 +187,15 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 		now := time.Now()
 		if !now.Before(deadline) { return nil, context.DeadlineExceeded }
 		attemptDeadline := deadline
-		if attempt <= c.config.MaxRetries {
+		sendAttempt := attempt <= c.config.MaxRetries
+		if sendAttempt {
 			attemptDeadline = now.Add(c.config.RetryInterval)
 			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
-			if _, err := conn.Write(packet); err != nil { return nil, err }
 		}
 		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
+		if sendAttempt {
+			if _, err := conn.Write(packet); err != nil { return nil, err }
+		}
 		n, err = conn.Read(buf)
 		if err == nil { break }
 		if ne, ok := err.(net.Error); !ok || !ne.Timeout() { return nil, err }
