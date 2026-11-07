@@ -1,16 +1,17 @@
 # CALLGRAPH roadmap
 
-- [x] Transport-independent method registry.
-- [x] Context-aware handler dispatch.
-- [x] Request and response size limits.
-- [x] Duplicate and unknown method handling.
-- [ ] Versioned method descriptors and stable operation IDs.
-- [ ] Request correlation, deadlines and cancellation semantics.
-- [ ] Structured error model.
-- [ ] Authentication and authorization hooks.
-- [ ] OCTET codec adapter.
-- [ ] DATAGRAM transport adapter.
-- [ ] Retry/idempotency and replay protection specification.
-- [ ] Streaming/backpressure profile and benchmarks.
+- [x] Transport-independent operation registry and dispatch.
+- [x] Versioned operation descriptors and stable operation IDs.
+- [x] Request correlation IDs and deadline-aware execution.
+- [x] Authorization hook and operation scopes.
+- [x] CALLGRAPH frame codec and OCTET/DATAGRAM wire adapters.
+- [x] UDP client/server with bounded payloads and concurrent workers.
+- [x] Optional AES-256-GCM PSK protection shared with the Rust CONTRACT client.
+- [x] Bounded retransmission, duplicate suppression and cached response replay.
+- [ ] Structured, typed error catalogue and stable error codes.
+- [ ] Cancellation propagation beyond the server-side handler context.
+- [ ] Congestion control, MTU discovery and fair scheduling.
+- [ ] Key rotation negotiation, forward secrecy and certificate identity.
+- [ ] Streaming/backpressure profile, fuzzing and benchmarks.
 
-The initial implementation is a local dispatcher, not a remotely accessible RPC service.
+The current UDP profile is an experimental PSK-based research implementation. It is not a reviewed production transport standard.
