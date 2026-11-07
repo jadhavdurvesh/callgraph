@@ -140,6 +140,7 @@ func openSecurePayload(key []byte, session uint64, sequence uint64, response boo
 }
 
 // UDPClient sends CALLGRAPH frames inside OCTET frames inside DATAGRAM envelopes.
+type CallOptions struct { RetrySafe bool }
 type UDPClient struct { config UDPConfig }
 
 func NewUDPClient(config UDPConfig) (*UDPClient, error) {
@@ -148,6 +149,12 @@ func NewUDPClient(config UDPConfig) (*UDPClient, error) {
 }
 
 func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte) ([]byte, error) {
+	return c.CallWithOptions(ctx, address, operationID, major, minor, payload, CallOptions{})
+}
+
+// CallWithOptions retransmits only when the caller explicitly declares the
+// operation retry-safe. Non-idempotent operations must not be retried blindly.
+func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte, options CallOptions) ([]byte, error) {
 	if len(payload) > c.config.MaxPayloadBytes { return nil, ErrPayloadTooLarge }
 	remote, err := net.ResolveUDPAddr("udp", address)
 	if err != nil { return nil, err }
@@ -188,7 +195,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 		now := time.Now()
 		if !now.Before(deadline) { return nil, context.DeadlineExceeded }
 		attemptDeadline := deadline
-		sendAttempt := attempt <= c.config.MaxRetries
+		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
 		if sendAttempt {
 			attemptDeadline = now.Add(c.config.RetryInterval)
 			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
