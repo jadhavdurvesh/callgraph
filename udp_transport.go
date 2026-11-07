@@ -168,7 +168,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 
 	frame, err := EncodeFrame(Frame{Kind: kindRequest, RequestID: requestID, OperationID: operationID, Major: major, Minor: minor, DeadlineMillis: durationMillis(budget), Payload: payload}, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
-	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-20IfEncrypted(c.config.PreSharedKey))
+	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
 	if err != nil { return nil, err }
 	wirePayload := octets
 	if len(c.config.PreSharedKey) == 32 {
@@ -350,7 +350,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	}
 	responseFrame, err := EncodeFrame(Frame{Kind: kind, RequestID: request.RequestID, OperationID: request.OperationID, Major: request.Major, Minor: request.Minor, Payload: result}, s.config.MaxPayloadBytes)
 	if err != nil { return nil }
-	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-20IfEncrypted(s.config.PreSharedKey))
+	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(s.config.PreSharedKey))
 	if err != nil { return nil }
 	wirePayload := octets
 	if len(s.config.PreSharedKey) == 32 {
@@ -362,7 +362,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	return response
 }
 
-func 20IfEncrypted(key []byte) int { if len(key)==32 { return 20 }; return 0 }
+func secureOverhead(key []byte) int { if len(key)==32 { return 20 }; return 0 }
 
 func durationMillis(d time.Duration) uint32 {
 	ms := d / time.Millisecond
