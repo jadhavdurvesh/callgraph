@@ -37,14 +37,16 @@ type UDPConfig struct {
 	ReadPollInterval time.Duration
 	MaxConcurrentRequests int
 	MaxReplayEntries int
+	MaxRetries int
+	RetryInterval time.Duration
 }
 
 func DefaultUDPConfig() UDPConfig {
-	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond, MaxConcurrentRequests: 128, MaxReplayEntries: 8192}
+	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond, MaxConcurrentRequests: 128, MaxReplayEntries: 8192, MaxRetries: 2, RetryInterval: 250 * time.Millisecond}
 }
 
 func (c UDPConfig) validate() error {
-	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 {
+	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 {}
 		return errors.New("callgraph: invalid UDP transport limits")
 	}
 	if c.MaxPayloadBytes+datagramHeaderSize+octetHeaderSize+FrameHeaderSize > c.MaxDatagramBytes {
@@ -136,13 +138,20 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 
 	deadline := time.Now().Add(budget)
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) { deadline = parentDeadline }
-	if err := conn.SetDeadline(deadline); err != nil { return nil, err }
-	if _, err := conn.Write(packet); err != nil { return nil, err }
 	buf := make([]byte, c.config.MaxDatagramBytes)
-	n, err := conn.Read(buf)
-	if err != nil {
-		if ctx.Err() != nil { return nil, ctx.Err() }
-		return nil, err
+	var n int
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil { return nil, err }
+		if time.Now().After(deadline) { return nil, context.DeadlineExceeded }
+		attemptDeadline := time.Now().Add(c.config.RetryInterval)
+		if attempt > c.config.MaxRetries { attemptDeadline = deadline }
+		if attemptDeadline.After(deadline) { attemptDeadline = deadline }
+		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
+		if _, err := conn.Write(packet); err != nil { return nil, err }
+		n, err = conn.Read(buf)
+		if err == nil { break }
+		if ne, ok := err.(net.Error); !ok || !ne.Timeout() { return nil, err }
+		if attempt >= c.config.MaxRetries { return nil, context.DeadlineExceeded }
 	}
 	envelope, err := decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
@@ -164,6 +173,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 
 // UDPServer dispatches registered CALLGRAPH operations over the shared wire profiles.
 type replayKey struct { session uint64; sequence uint64 }
+type replayEntry struct { expires time.Time; response []byte }
 
 type UDPServer struct {
 	runtime *Runtime
@@ -171,7 +181,7 @@ type UDPServer struct {
 	mu sync.RWMutex
 	operations map[uint32]Descriptor
 	replayMu sync.Mutex
-	replay map[replayKey]time.Time
+	replay map[replayKey]replayEntry
 	workers chan struct{}
 	wg sync.WaitGroup
 }
@@ -179,7 +189,7 @@ type UDPServer struct {
 func NewUDPServer(runtime *Runtime, config UDPConfig) (*UDPServer, error) {
 	if runtime == nil { return nil, errors.New("callgraph: runtime is required") }
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]time.Time), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
+	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
 }
 
 func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handler Handler) error {
@@ -207,7 +217,12 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		if n > s.config.MaxDatagramBytes { continue }
 		packet := append([]byte(nil), buf[:n]...)
 		envelope, decodeErr := decodeDatagram(packet, s.config.MaxDatagramBytes)
-		if decodeErr != nil || !s.acceptReplay(envelope) { continue }
+		if decodeErr != nil { continue }
+		accepted, cached := s.acceptReplay(envelope)
+		if !accepted {
+			if len(cached) > 0 { _, _ = conn.WriteToUDP(cached, peer) }
+			continue
+		}
 		select {
 		case s.workers <- struct{}{}:
 			s.wg.Add(1)
@@ -215,6 +230,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				defer s.wg.Done()
 				defer func(){ <-s.workers }()
 				if response := s.handlePacket(ctx, packet); len(response) > 0 {
+					s.storeReplayResponse(envelope, response)
 					_, _ = conn.WriteToUDP(response, peer)
 				}
 			}(peer, packet)
@@ -227,18 +243,30 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 	return ctx.Err()
 }
 
-func (s *UDPServer) acceptReplay(envelope datagramEnvelope) bool {
+func (s *UDPServer) acceptReplay(envelope datagramEnvelope) (bool, []byte) {
 	now := time.Now()
 	key := replayKey{session: envelope.session, sequence: envelope.sequence}
 	s.replayMu.Lock()
 	defer s.replayMu.Unlock()
-	if expiry, exists := s.replay[key]; exists && now.Before(expiry) { return false }
-	if len(s.replay) >= s.config.MaxReplayEntries {
-		for k, expiry := range s.replay { if !now.Before(expiry) { delete(s.replay, k) } }
-		if len(s.replay) >= s.config.MaxReplayEntries { return false }
+	if entry, exists := s.replay[key]; exists && now.Before(entry.expires) {
+		return false, append([]byte(nil), entry.response...)
 	}
-	s.replay[key] = now.Add(2 * s.config.RequestTimeout)
-	return true
+	if len(s.replay) >= s.config.MaxReplayEntries {
+		for k, entry := range s.replay { if !now.Before(entry.expires) { delete(s.replay, k) } }
+		if len(s.replay) >= s.config.MaxReplayEntries { return false, nil }
+	}
+	s.replay[key] = replayEntry{expires: now.Add(2 * s.config.RequestTimeout)}
+	return true, nil
+}
+
+func (s *UDPServer) storeReplayResponse(envelope datagramEnvelope, response []byte) {
+	key := replayKey{session: envelope.session, sequence: envelope.sequence}
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	entry, ok := s.replay[key]
+	if !ok { return }
+	entry.response = append([]byte(nil), response...)
+	s.replay[key] = entry
 }
 
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
