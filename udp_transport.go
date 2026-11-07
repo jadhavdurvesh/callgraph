@@ -184,16 +184,20 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	var n int
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil { return nil, err }
-		if time.Now().After(deadline) { return nil, context.DeadlineExceeded }
-		attemptDeadline := time.Now().Add(c.config.RetryInterval)
-		if attempt > c.config.MaxRetries { attemptDeadline = deadline }
-		if attemptDeadline.After(deadline) { attemptDeadline = deadline }
+		now := time.Now()
+		if !now.Before(deadline) { return nil, context.DeadlineExceeded }
+		attemptDeadline := deadline
+		if attempt <= c.config.MaxRetries {
+			attemptDeadline = now.Add(c.config.RetryInterval)
+			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
+			if _, err := conn.Write(packet); err != nil { return nil, err }
+		}
 		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
-		if _, err := conn.Write(packet); err != nil { return nil, err }
 		n, err = conn.Read(buf)
 		if err == nil { break }
 		if ne, ok := err.(net.Error); !ok || !ne.Timeout() { return nil, err }
-		if attempt >= c.config.MaxRetries { return nil, context.DeadlineExceeded }
+		// Once the retry budget is spent, wait for the original in-flight
+		// response until the overall request deadline without sending again.
 	}
 	envelope, err := decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
