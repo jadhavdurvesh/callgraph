@@ -170,7 +170,7 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	if err != nil { return nil, err }
 	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
 	if err != nil { return nil, err }
-	wirePayload := octets
+	wirePayload = octets
 	if len(c.config.PreSharedKey) == 32 {
 		wirePayload, err = sealSecurePayload(c.config.PreSharedKey, session, 1, false, octets)
 		if err != nil { return nil, err }
