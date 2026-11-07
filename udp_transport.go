@@ -196,13 +196,12 @@ func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handle
 func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 	if conn == nil { return errors.New("callgraph: UDP socket is required") }
 	buf := make([]byte, s.config.MaxDatagramBytes+1)
-	for {
-		if err := ctx.Err(); err != nil { return err }
+	for ctx.Err() == nil {
 		_ = conn.SetReadDeadline(time.Now().Add(s.config.ReadPollInterval))
 		n, peer, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() { continue }
-			if ctx.Err() != nil { return ctx.Err() }
+			if ctx.Err() != nil { break }
 			return err
 		}
 		if n > s.config.MaxDatagramBytes { continue }
@@ -225,6 +224,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		}
 	}
 	s.wg.Wait()
+	return ctx.Err()
 }
 
 func (s *UDPServer) acceptReplay(envelope datagramEnvelope) bool {
