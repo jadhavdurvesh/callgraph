@@ -14,7 +14,8 @@ CALLGRAPH is a typed remote-operation runtime. Its UDP profile transports CALLGR
 - Cached responses for duplicate requests, enabling safe retransmission without re-executing a completed operation.
 - Configurable bounded retries and request deadlines. Retransmission is opt-in through `CallOptions{RetrySafe: true}`; only use it for operations safe to repeat.
 - Stable structured remote error codes: 1001 method missing, 1002 major-version mismatch, 1003 unauthorized, 1004 deadline exceeded, 1005 payload limit, and 1500 internal error.
-- ACK1 codec interoperable with the Rust DATAGRAM implementation, with up to eight bounded acknowledgement ranges. The codec is not yet connected to the UDP request/response scheduler.
+- ACK1 codec interoperable with the Rust DATAGRAM implementation, with up to eight bounded acknowledgement ranges.
+- ACK-driven server response retransmission: response packet 2 is resent on a bounded timer until the client returns an authenticated ACK1 (when PSK encryption is enabled). Duplicate requests reuse the cached response rather than executing the operation again.
 - Optional AES-256-GCM authenticated encryption using a 32-byte pre-shared key.
 - Separate nonce domains for request and response directions.
 
@@ -33,7 +34,7 @@ The current profile uses a 64-bit random session identifier and a 31-bit sequenc
 
 ## Limitations
 
-This is a research implementation, not yet a production transport standard. It does not yet implement congestion control, path MTU discovery, key rotation negotiation, forward secrecy, certificate-based identity, or a formal threat-model review. Retransmission is bounded and response caching is in-memory. UDP overload can cause packet drops. Do not use it for hard real-time or emergency-stop control.
+This is a research implementation, not yet a production transport standard. ACK1 currently acknowledges server responses; it is not a complete bidirectional reliable transport, and congestion control and path MTU discovery are not yet wired into CALLGRAPH's Go scheduler. Key rotation negotiation, forward secrecy, certificate-based identity, and a formal threat-model review also remain outstanding. Retransmission is bounded and response caching is in-memory. UDP overload can cause packet drops. Do not use it for hard real-time or emergency-stop control.
 
 ## Repositories
 
