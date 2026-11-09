@@ -1,6 +1,7 @@
 package callgraph
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -209,19 +210,49 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 		// Once the retry budget is spent, wait for the original in-flight
 		// response until the overall request deadline without sending again.
 	}
-	envelope, err := decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
-	if err != nil { return nil, err }
-	if envelope.session != session || envelope.sequence != 1 { return nil, ErrMalformedDatagram }
-	wirePayload = envelope.payload
-	if len(c.config.PreSharedKey) == 32 {
-		wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 1, true, wirePayload)
-		if err != nil { return nil, err }
+	var envelope datagramEnvelope
+	for {
+		if err := ctx.Err(); err != nil { return nil, err }
+		if !time.Now().Before(deadline) { return nil, context.DeadlineExceeded }
+		attemptDeadline := deadline
+		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
+		if sendAttempt {
+			attemptDeadline = time.Now().Add(c.config.RetryInterval)
+			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
+		}
+		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
+		if sendAttempt {
+			if _, err := conn.Write(packet); err != nil { return nil, err }
+		}
+		n, err = conn.Read(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() { attempt++; continue }
+			return nil, err
+		}
+		envelope, err = decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
+		if err != nil || envelope.session != session { continue }
+		if envelope.sequence != 2 { continue }
+		wirePayload = envelope.payload
+		if len(c.config.PreSharedKey) == 32 {
+			wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 2, true, wirePayload)
+			if err != nil { continue }
+		}
+		if bytes.HasPrefix(wirePayload, []byte("ACK1")) { continue }
+		break
 	}
 	rpcWire, err := decodeOCTET(wirePayload, c.config.MaxDatagramBytes)
 	if err != nil { return nil, err }
 	response, err := DecodeFrame(rpcWire, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
 	if response.RequestID != requestID { return nil, ErrMalformedFrame }
+	// ACK the response packet so the server can stop its bounded retransmission timer.
+	ackWire, err := (AckFrame{LargestAcked: 2, Ranges: []AckRange{{First: 2, Last: 2}}}).Encode()
+	if err == nil {
+		if len(c.config.PreSharedKey) == 32 { ackWire, err = sealSecurePayload(c.config.PreSharedKey, session, 2, false, ackWire) }
+		if err == nil {
+			if ackPacket, encodeErr := encodeDatagram(session, 2, ackWire, c.config.MaxDatagramBytes); encodeErr == nil { _, _ = conn.Write(ackPacket) }
+		}
+	}
 	switch response.Kind {
 	case kindResponse:
 		return response.Payload, nil
@@ -237,6 +268,8 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 // UDPServer dispatches registered CALLGRAPH operations over the shared wire profiles.
 type replayKey struct { session uint64; sequence uint64 }
 type replayEntry struct { expires time.Time; response []byte }
+type pendingResponseKey struct { session uint64; peer string }
+type pendingResponse struct { packet []byte }
 
 type UDPServer struct {
 	runtime *Runtime
@@ -246,6 +279,8 @@ type UDPServer struct {
 	replayMu sync.Mutex
 	replay map[replayKey]replayEntry
 	replayBytes int
+	pendingMu sync.Mutex
+	pending map[pendingResponseKey]pendingResponse
 	workers chan struct{}
 	wg sync.WaitGroup
 }
@@ -253,7 +288,7 @@ type UDPServer struct {
 func NewUDPServer(runtime *Runtime, config UDPConfig) (*UDPServer, error) {
 	if runtime == nil { return nil, errors.New("callgraph: runtime is required") }
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
+	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), pending: make(map[pendingResponseKey]pendingResponse), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
 }
 
 func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handler Handler) error {
@@ -284,9 +319,16 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		if decodeErr != nil { continue }
 		// Authenticate encrypted packets before allowing them to consume replay-cache
 		// capacity; otherwise unauthenticated traffic could exhaust the bounded cache.
+		plainPayload := envelope.payload
 		if len(s.config.PreSharedKey) == 32 {
-			if _, authErr := openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, envelope.payload); authErr != nil { continue }
+			plainPayload, decodeErr = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, envelope.payload)
+			if decodeErr != nil { continue }
 		} else if s.config.RequireEncryption { continue }
+		if bytes.HasPrefix(plainPayload, []byte("ACK1")) {
+			ack, ackErr := DecodeACK(plainPayload)
+			if ackErr == nil && envelope.sequence == 2 { s.acknowledgeResponse(peer, envelope.session, ack) }
+			continue
+		}
 		accepted, cached := s.acceptReplay(envelope)
 		if !accepted {
 			if len(cached) > 0 { _, _ = conn.WriteToUDP(cached, peer) }
@@ -295,14 +337,14 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		select {
 		case s.workers <- struct{}{}:
 			s.wg.Add(1)
-			go func(peer *net.UDPAddr, packet []byte) {
+			go func(peer *net.UDPAddr, packet []byte, requestEnvelope datagramEnvelope) {
 				defer s.wg.Done()
 				defer func(){ <-s.workers }()
 				if response := s.handlePacket(ctx, packet); len(response) > 0 {
-					s.storeReplayResponse(envelope, response)
-					_, _ = conn.WriteToUDP(response, peer)
+					s.storeReplayResponse(requestEnvelope, response)
+					s.transmitResponse(ctx, conn, peer, requestEnvelope.session, response)
 				}
-			}(peer, packet)
+			}(peer, packet, envelope)
 		default:
 			// Bounded overload policy: drop excess datagrams rather than queue
 			// unbounded work or block the socket reader.
@@ -310,6 +352,48 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 	}
 	s.wg.Wait()
 	return ctx.Err()
+}
+
+// transmitResponse retains a bounded response until the peer acknowledges packet 2.
+// The worker slot remains occupied during this finite retry window, preserving the
+// server's existing concurrency bound.
+func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, session uint64, packet []byte) {
+	key := pendingResponseKey{session: session, peer: peer.String()}
+	s.pendingMu.Lock()
+	s.pending[key] = pendingResponse{packet: append([]byte(nil), packet...)}
+	s.pendingMu.Unlock()
+	defer func() {
+		s.pendingMu.Lock()
+		delete(s.pending, key)
+		s.pendingMu.Unlock()
+	}()
+	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
+		if ctx.Err() != nil { return }
+		if _, err := conn.WriteToUDP(packet, peer); err != nil { return }
+		if attempt == s.config.MaxRetries { return }
+		timer := time.NewTimer(s.config.RetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop(); return
+		case <-timer.C:
+		}
+		s.pendingMu.Lock()
+		_, waiting := s.pending[key]
+		s.pendingMu.Unlock()
+		if !waiting { return }
+	}
+}
+
+// acknowledgeResponse removes a pending response only when ACK1 covers packet 2.
+func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr, session uint64, ack AckFrame) {
+	if ack.Validate() != nil || ack.LargestAcked != 2 { return }
+	covered := false
+	for _, r := range ack.Ranges { if r.First <= 2 && r.Last >= 2 { covered = true; break } }
+	if !covered { return }
+	key := pendingResponseKey{session: session, peer: peer.String()}
+	s.pendingMu.Lock()
+	delete(s.pending, key)
+	s.pendingMu.Unlock()
 }
 
 func (s *UDPServer) acceptReplay(envelope datagramEnvelope) (bool, []byte) {
@@ -388,10 +472,10 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	if err != nil { return nil }
 	wirePayload = octets
 	if len(s.config.PreSharedKey) == 32 {
-		wirePayload, err = sealSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, true, octets)
+		wirePayload, err = sealSecurePayload(s.config.PreSharedKey, envelope.session, 2, true, octets)
 		if err != nil { return nil }
 	}
-	response, err := encodeDatagram(envelope.session, envelope.sequence, wirePayload, s.config.MaxDatagramBytes)
+	response, err := encodeDatagram(envelope.session, 2, wirePayload, s.config.MaxDatagramBytes)
 	if err != nil { return nil }
 	return response
 }
