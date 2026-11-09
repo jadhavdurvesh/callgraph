@@ -14,6 +14,7 @@ func TestUDPClientServerLargeFragmentedRequestAndResponse(t *testing.T) {
 		t.Run(name,func(t *testing.T){
 			runtime,err:=New(DefaultConfig());if err!=nil{t.Fatal(err)}
 			cfg:=DefaultUDPConfig()
+			cfg.MaxDatagramBytes=1200 // exercise reassembly below the path MTU
 			cfg.RequestTimeout=8*time.Second
 			cfg.RetryInterval=40*time.Millisecond
 			cfg.MaxRetries=4
