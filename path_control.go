@@ -12,6 +12,8 @@ import (
 const (
 	defaultPathDatagramSize = 1200
 	maximumProbeDatagramSize = 1452
+	maximumClientPathStates = 1024
+	maximumServerPathStates = 4096
 	mtuProbeHeaderSize = 16
 )
 
