@@ -1,7 +1,6 @@
 package callgraph
 
 import (
-	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -9,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
