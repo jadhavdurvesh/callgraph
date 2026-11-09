@@ -79,6 +79,7 @@ type fragmentAssembly struct {
 	data []byte
 	received []bool
 	count int
+	chunkSize int
 	bytesReceived int
 	expires time.Time
 }
@@ -108,11 +109,20 @@ func (r *fragmentReassembler) Add(key string,f messageFragment,now time.Time) ([
 	}
 	m:=r.messages[key]
 	if m==nil {
+		chunkSize:=0
+		if f.index==0 { chunkSize=len(f.data) } else if f.offset%uint32(f.index)==0 { chunkSize=int(f.offset/uint32(f.index)) }
+		if chunkSize<=0 || (int(f.total)+chunkSize-1)/chunkSize!=int(f.count) ||
+			int(f.offset)!=int(f.index)*chunkSize ||
+			len(f.data)!=min(chunkSize,int(f.total)-int(f.offset)) {
+			return nil,false,ErrMalformedFragment
+		}
 		if len(r.messages)>=r.maxMessages || int(f.total)>r.maxBytes-r.usedBytes { return nil,false,ErrReassemblyLimit }
-		m=&fragmentAssembly{data:make([]byte,int(f.total)),received:make([]bool,int(f.count)),count:int(f.count),expires:now.Add(r.ttl)}
+		m=&fragmentAssembly{data:make([]byte,int(f.total)),received:make([]bool,int(f.count)),count:int(f.count),chunkSize:chunkSize,expires:now.Add(r.ttl)}
 		r.messages[key]=m
 		r.usedBytes+=len(m.data)
-	} else if len(m.data)!=int(f.total) || m.count!=int(f.count) {
+	} else if len(m.data)!=int(f.total) || m.count!=int(f.count) ||
+		int(f.offset)!=int(f.index)*m.chunkSize ||
+		len(f.data)!=min(m.chunkSize,int(f.total)-int(f.offset)) {
 		r.usedBytes-=len(m.data); delete(r.messages,key)
 		return nil,false,ErrMalformedFragment
 	}
@@ -121,38 +131,11 @@ func (r *fragmentReassembler) Add(key string,f messageFragment,now time.Time) ([
 		for i,b:=range f.data { if m.data[start+i]!=b { r.usedBytes-=len(m.data);delete(r.messages,key);return nil,false,ErrMalformedFragment } }
 		return nil,false,nil
 	}
-	// Reject overlaps, gaps and non-canonical offsets. All non-final fragments
-	// must have the same size, so offsets are deterministic from fragment index.
-	if f.index>0 {
-		prev:=false
-		for i:=0;i<int(f.index);i++ { if m.received[i] { prev=true } }
-		_ = prev
-	}
 	for i,received:=range m.received {
 		if !received { continue }
-		_ = i
-	}
-	for i:=start;i<end;i++ {
-		// An already populated byte indicates an overlapping fragment.
-		if m.data[i]!=0 { /* zero-valued payload bytes are checked by ranges below */ }
-	}
-	// Check overlap against received fragment ranges by reconstructing canonical
-	// ranges from the first observed chunk length.
-	for i,received:=range m.received {
-		if !received { continue }
-		chunk:=0
-		if m.count>1 {
-			// All fragments except the final fragment have a common chunk size.
-			chunk=(len(m.data)+m.count-1)/m.count
-		} else { chunk=len(m.data) }
-		otherStart:=i*chunk
-		otherEnd:=min(len(m.data),otherStart+chunk)
+		otherStart:=i*m.chunkSize
+		otherEnd:=min(len(m.data),otherStart+m.chunkSize)
 		if start<otherEnd && otherStart<end { r.usedBytes-=len(m.data);delete(r.messages,key);return nil,false,ErrMalformedFragment }
-	}
-	chunk:=(len(m.data)+m.count-1)/m.count
-	if int(f.index)*chunk!=start || end!=min(len(m.data),start+chunk) {
-		r.usedBytes-=len(m.data);delete(r.messages,key)
-		return nil,false,ErrMalformedFragment
 	}
 	copy(m.data[start:end],f.data)
 	m.received[int(f.index)]=true
