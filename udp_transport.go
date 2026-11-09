@@ -273,13 +273,15 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		}
 		select {
 		case s.workers<-struct{}{}:
-			accepted,cached,known:=s.acceptReplay(envelope.session,fragment.messageID)
+			accepted,cached,known,retransmit:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
 				if !known { continue } // replay table is full; fail closed
-				if len(cached)==0 {
-					// The original request is still being executed. ACK the
-					// duplicate fragment; its original response is in flight.
+				if !retransmit {
+					if len(cached)==0 {
+						// The original request is still executing. ACK the
+						// duplicate fragment; its response will follow.
+					}
 					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					continue
 				}
@@ -289,6 +291,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 					go func(peer *net.UDPAddr,session,messageID uint64,response []byte,path *udpPathState){
 						defer s.wg.Done();defer func(){<-s.workers}()
 						s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
+						s.finishReplayTransmission(session,messageID)
 					}(peer,envelope.session,fragment.messageID,cached,path)
 				default:}
 				continue
@@ -301,12 +304,13 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				if len(s.config.PreSharedKey)==32 {
 					var sealErr error
 					wire,sealErr=sealSecurePayload(s.config.PreSharedKey,session,assembledRequestSequence,false,assembled)
-					if sealErr!=nil{return}
+					if sealErr!=nil{s.finishReplayTransmission(session,messageID);return}
 				}
-				requestPacket,encodeErr:=encodeDatagram(session,assembledRequestSequence,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
-				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{return}
+				requestPacket,encodeErr:=encodeDatagram(session,assembledRequestSequence,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{s.finishReplayTransmission(session,messageID);return}
+				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{s.finishReplayTransmission(session,messageID);return}
 				s.storeReplayResponse(session,messageID,response)
 				s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
+				s.finishReplayTransmission(session,messageID)
 			}(peer,envelope.session,fragment.messageID,assembled,path)
 		default:
 			// Do not acknowledge the final fragment while execution capacity is
