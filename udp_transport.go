@@ -243,7 +243,8 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	if err != nil { return nil, err }
 	if response.RequestID != requestID { return nil, ErrMalformedFrame }
 	// The response proves the request reached the peer; release its in-flight budget.
-	path.ack(requestPathID)	
+	path.ack(requestPathID)
+	requestAcknowledged = true
 	// ACK the response packet so the server can stop its bounded retransmission timer.
 	ackWire, err := (AckFrame{LargestAcked: envelope.sequence, Ranges: []AckRange{{First: envelope.sequence, Last: envelope.sequence}}}).Encode()
 	if err == nil {
