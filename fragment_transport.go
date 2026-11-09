@@ -65,11 +65,10 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 	return nil
 }
 
-func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPConn,session uint64,mtu int) ([]byte,error) {
+func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPConn,session uint64,mtu int,deadline time.Time) ([]byte,error) {
 	reassembler:=newFragmentReassembler(c.config.MaxReassemblyBytes,c.config.MaxReassemblyMessages,c.config.ReassemblyTimeout)
 	buf:=make([]byte,c.config.MaxDatagramBytes)
 	var messageID uint64
-	deadline:=time.Now().Add(c.config.RequestTimeout)
 	for {
 		if err:=ctx.Err();err!=nil{return nil,err}
 		if !time.Now().Before(deadline){return nil,context.DeadlineExceeded}
