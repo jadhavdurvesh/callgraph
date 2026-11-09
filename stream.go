@@ -9,6 +9,7 @@ import (
 // StreamReader is the read half of a bounded, backpressured byte stream.
 type StreamReader struct {
 	pipe *io.PipeReader
+	ctx context.Context
 	done chan struct{}
 	stop context.CancelFunc
 	once sync.Once
@@ -18,6 +19,7 @@ type StreamReader struct {
 // StreamWriter is the write half of a bounded, backpressured byte stream.
 type StreamWriter struct {
 	pipe *io.PipeWriter
+	ctx context.Context
 	done chan struct{}
 	stop context.CancelFunc
 	once sync.Once
@@ -34,8 +36,8 @@ func NewStreamPipe(parent context.Context) (*StreamReader, *StreamWriter) {
 	reader, writer := io.Pipe()
 	done := make(chan struct{})
 	doneOnce := &sync.Once{}
-	r := &StreamReader{pipe:reader,done:done,stop:cancel,doneOnce:doneOnce}
-	w := &StreamWriter{pipe:writer,done:done,stop:cancel,doneOnce:doneOnce}
+	r := &StreamReader{pipe:reader,ctx:ctx,done:done,stop:cancel,doneOnce:doneOnce}
+	w := &StreamWriter{pipe:writer,ctx:ctx,done:done,stop:cancel,doneOnce:doneOnce}
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -49,7 +51,9 @@ func NewStreamPipe(parent context.Context) (*StreamReader, *StreamWriter) {
 
 func (r *StreamReader) Read(p []byte) (int,error) {
 	if r==nil||r.pipe==nil{return 0,io.ErrClosedPipe}
-	return r.pipe.Read(p)
+	n,err:=r.pipe.Read(p)
+	if err!=nil&&r.ctx.Err()!=nil{return n,r.ctx.Err()}
+	return n,err
 }
 
 func (r *StreamReader) Close() error {
@@ -68,7 +72,9 @@ func (r *StreamReader) CloseWithError(cause error) error {
 
 func (w *StreamWriter) Write(p []byte) (int,error) {
 	if w==nil||w.pipe==nil{return 0,io.ErrClosedPipe}
-	return w.pipe.Write(p)
+	n,err:=w.pipe.Write(p)
+	if err!=nil&&w.ctx.Err()!=nil{return n,w.ctx.Err()}
+	return n,err
 }
 
 func (w *StreamWriter) Close() error {
