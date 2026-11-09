@@ -303,13 +303,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 					if sealErr!=nil{return}
 				}
 				requestPacket,encodeErr:=encodeDatagram(session,1,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
-				responsePacket:=s.handlePacket(ctx,requestPacket);if len(responsePacket)==0{return}
-				responseEnvelope,decodeErr:=decodeDatagram(responsePacket,s.config.MaxDatagramBytes);if decodeErr!=nil{return}
-				response:=responseEnvelope.payload
-				if len(s.config.PreSharedKey)==32 {
-					response,decodeErr=openSecurePayload(s.config.PreSharedKey,session,2,true,response)
-					if decodeErr!=nil{return}
-				}
+				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{return}
 				s.storeReplayResponse(session,messageID,response)
 				s.transmitMessage(ctx,conn,peer,session,response,path)
 			}(peer,envelope.session,fragment.messageID,assembled,path)
