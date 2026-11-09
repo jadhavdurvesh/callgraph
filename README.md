@@ -15,7 +15,10 @@ CALLGRAPH is a typed remote-operation runtime. Its UDP profile transports CALLGR
 - Configurable bounded retries and request deadlines. Retransmission is opt-in through `CallOptions{RetrySafe: true}`; only use it for operations safe to repeat.
 - Stable structured remote error codes: 1001 method missing, 1002 major-version mismatch, 1003 unauthorized, 1004 deadline exceeded, 1005 payload limit, and 1500 internal error.
 - ACK1 codec interoperable with the Rust DATAGRAM implementation, with up to eight bounded acknowledgement ranges.
-- ACK-driven server response retransmission: response packet 2 is resent on a bounded timer until the client returns an authenticated ACK1 (when PSK encryption is enabled). Duplicate requests reuse the cached response rather than executing the operation again.
+- ACK-driven server response retransmission: response packet 2 is resent on an adaptive bounded timer until the client returns ACK1 (authenticated by AES-256-GCM when PSK encryption is enabled).
+- Per-peer path congestion control: byte-based congestion window, pacing, RTT/RTO estimation, ACK feedback and bounded in-flight packet metadata.
+- Per-peer MTU discovery: challenge/response probes search up to a conservative 1452-byte UDP datagram ceiling, starting from a 1200-byte baseline.
+- Application datagrams are bounded by the discovered path size; fragmentation/reassembly is not yet implemented.
 - Optional AES-256-GCM authenticated encryption using a 32-byte pre-shared key.
 - Separate nonce domains for request and response directions.
 
@@ -34,7 +37,7 @@ The current profile uses a 64-bit random session identifier and a 31-bit sequenc
 
 ## Limitations
 
-This is a research implementation, not yet a production transport standard. ACK1 currently acknowledges server responses; it is not a complete bidirectional reliable transport, and congestion control and path MTU discovery are not yet wired into CALLGRAPH's Go scheduler. Key rotation negotiation, forward secrecy, certificate-based identity, and a formal threat-model review also remain outstanding. Retransmission is bounded and response caching is in-memory. UDP overload can cause packet drops. Do not use it for hard real-time or emergency-stop control.
+This is a research implementation, not yet a production transport standard. ACK1 currently acknowledges server responses, and the client treats a valid response as implicit acknowledgement of its request. Congestion control and MTU discovery are now integrated into the Go scheduler, but the reliability profile remains stop-and-wait per request rather than a general bidirectional reliable transport. The current MTU probe challenge is not cryptographically authenticated without PSK mode; use PSK mode on untrusted networks. Fragmentation/reassembly, ECN, fairness testing, key rotation negotiation, forward secrecy, certificate identity, and a formal threat-model review remain outstanding. Key rotation negotiation, forward secrecy, certificate-based identity, and a formal threat-model review also remain outstanding. Retransmission is bounded and response caching is in-memory. UDP overload can cause packet drops. Do not use it for hard real-time or emergency-stop control.
 
 ## Repositories
 
