@@ -18,7 +18,9 @@
 - [x] Plaintext and AES-GCM large-message integration tests, plus response-fragment loss/retransmission coverage.
 - [ ] Cancellation propagation beyond the server-side handler context.
 - [x] Bounded eight-fragment selective-repeat delivery with independent ACK processing.
-- [ ] ACK range batching, streaming/backpressure and fair scheduling.
+- [x] In-process streaming pipe primitive with synchronous backpressure and context cancellation.
+- [ ] Versioned wire-level stream framing, remote half-close and per-stream flow control.
+- [ ] ACK range batching and fair scheduling.
 - [ ] ECN and multi-path fairness tests.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
 - [ ] Fuzzing, adversarial network tests, interoperability vectors and benchmarks.
