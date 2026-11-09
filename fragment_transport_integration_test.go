@@ -42,8 +42,9 @@ func TestUDPClientServerLargeFragmentedRequestAndResponse(t *testing.T) {
 			got,err:=client.Call(callCtx,conn.LocalAddr().String(),d.ID,1,0,expected)
 			if err!=nil {
 				server.pendingMu.Lock();pending:=len(server.pending);server.pendingMu.Unlock()
-				server.replayMu.Lock();cachedBytes:=0;inFlight:=0;for _,entry:=range server.replay{cachedBytes+=len(entry.response);if entry.inFlight{inFlight++}};server.replayMu.Unlock()
-				t.Fatalf("call failed: %v; handler calls=%d pending fragments=%d cached response bytes=%d in-flight messages=%d",err,calls.Load(),pending,cachedBytes,inFlight)
+				server.replayMu.Lock();cachedBytes:=0;inFlight:=0;replayEntries:=len(server.replay);for _,entry:=range server.replay{cachedBytes+=len(entry.response);if entry.inFlight{inFlight++}};server.replayMu.Unlock()
+				server.reassembler.mu.Lock();assemblies:=len(server.reassembler.messages);received:=0;receivedBytes:=0;for _,assembly:=range server.reassembler.messages{for _,ok:=range assembly.received{if ok{received++}};receivedBytes+=assembly.bytesReceived};server.reassembler.mu.Unlock()
+				t.Fatalf("call failed: %v; handler calls=%d pending fragments=%d cached response bytes=%d in-flight messages=%d replay entries=%d assemblies=%d received fragments=%d received bytes=%d",err,calls.Load(),pending,cachedBytes,inFlight,replayEntries,assemblies,received,receivedBytes)
 			}
 			want:=append(append([]byte(nil),responsePrefix...),expected...)
 			if !bytes.Equal(got,want){t.Fatalf("fragmented response mismatch: got %d bytes, want %d",len(got),len(want))}
