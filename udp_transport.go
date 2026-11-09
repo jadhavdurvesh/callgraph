@@ -158,7 +158,7 @@ func (c *UDPClient) pathFor(address string) *udpPathState {
 	c.pathsMu.Lock()
 	defer c.pathsMu.Unlock()
 	path := c.paths[address]
-	if path == nil { path = newUDPPathState(c.config.MaxDatagramBytes); c.paths[address] = path }
+	if path == nil { path = newUDPPathState(c.config.MaxDatagramBytes); if len(c.paths)<maximumClientPathStates { c.paths[address] = path } }
 	return path
 }
 
@@ -308,7 +308,7 @@ func (s *UDPServer) pathFor(peer *net.UDPAddr) *udpPathState {
 	s.pathsMu.Lock()
 	defer s.pathsMu.Unlock()
 	path := s.paths[key]
-	if path == nil { path = newUDPPathState(s.config.MaxDatagramBytes); s.paths[key] = path }
+	if path == nil { path = newUDPPathState(s.config.MaxDatagramBytes); if len(s.paths)<maximumServerPathStates { s.paths[key] = path } }
 	return path
 }
 
