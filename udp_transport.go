@@ -23,6 +23,7 @@ const (
 	kindError          = 3
 	mtuProbeRequestSequence = uint64(0x0fffff00)
 	mtuProbeResponseSequence = uint64(0x0fffff01)
+	assembledRequestSequence = uint64(0x0fffff02)
 )
 
 var (
@@ -303,10 +304,10 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				wire:=assembled
 				if len(s.config.PreSharedKey)==32 {
 					var sealErr error
-					wire,sealErr=sealSecurePayload(s.config.PreSharedKey,session,1,false,assembled)
+					wire,sealErr=sealSecurePayload(s.config.PreSharedKey,session,assembledRequestSequence,false,assembled)
 					if sealErr!=nil{return}
 				}
-				requestPacket,encodeErr:=encodeDatagram(session,1,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
+				requestPacket,encodeErr:=encodeDatagram(session,assembledRequestSequence,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
 				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{return}
 				s.storeReplayResponse(session,messageID,response)
 				s.transmitMessage(ctx,conn,peer,session,response,path)
