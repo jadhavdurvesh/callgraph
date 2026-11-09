@@ -187,7 +187,7 @@ func (s *UDPServer) handleMTUProbe(conn *net.UDPConn, peer *net.UDPAddr, packet 
 	path.setPeerMTU(size)
 	response:=make([]byte,size-datagramHeaderSize-secureOverhead(s.config.PreSharedKey))
 	copy(response[:4],"MTA1");binary.BigEndian.PutUint64(response[4:12],probeID);binary.BigEndian.PutUint32(response[12:16],uint32(size))
-	for i:=mtuProbeHeaderSize;i<len(response);i++ {response[i]=byte((i*31+probeID)&0xff)}
+	for i:=mtuProbeHeaderSize;i<len(response);i++ {response[i]=byte((uint64(i)*31+probeID)&0xff)}
 	wire:=response
 	var err error
 	if len(s.config.PreSharedKey)==32 {wire,err=sealSecurePayload(s.config.PreSharedKey,envelope.session,4,true,response);if err!=nil{return}}
