@@ -53,10 +53,11 @@ func TestStreamPipeContextCancellationUnblocksWriter(t *testing.T) {
 
 func TestStreamPipeClosePropagatesEOF(t *testing.T) {
 	reader,writer:=NewStreamPipe(context.Background())
-	if _,err:=writer.Write([]byte("done"));err!=nil{t.Fatal(err)}
-	if err:=writer.Close();err!=nil{t.Fatal(err)}
+	writeDone:=make(chan error,1)
+	go func(){_,err:=writer.Write([]byte("done"));if err==nil{err=writer.Close()};writeDone<-err}()
 	got,err:=io.ReadAll(reader)
 	if err!=nil{t.Fatal(err)}
 	if string(got)!="done"{t.Fatalf("got %q",got)}
+	if err:=<-writeDone;err!=nil{t.Fatal(err)}
 	if err:=reader.Close();err!=nil{t.Fatal(err)}
 }
