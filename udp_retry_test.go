@@ -50,8 +50,10 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 				continue
 			}
 			if _,e=upstream.Write(packet);e!=nil{proxyDone<-e;return}
-			// Drop the first response fragment. The server must retransmit
-			// that same fragment until its fragment-level ACK is received.
+			// First forward the request-fragment ACK.
+			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
+			if _,e=proxy.WriteToUDP(buf[:n],peer);e!=nil{proxyDone<-e;return}
+			// Drop the first response fragment; forward the retransmission.
 			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
 			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
 			if _,e=proxy.WriteToUDP(buf[:n],peer);e!=nil{proxyDone<-e;return}
