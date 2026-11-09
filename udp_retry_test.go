@@ -12,6 +12,7 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 	runtime, err := New(DefaultConfig())
 	if err != nil { t.Fatal(err) }
 	serverConfig := DefaultUDPConfig()
+	serverConfig.MaxDatagramBytes=1200
 	serverConfig.RequestTimeout = time.Second
 	server, err := NewUDPServer(runtime, serverConfig)
 	if err != nil { t.Fatal(err) }
@@ -64,6 +65,7 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 		}
 	}()
 	clientConfig:=DefaultUDPConfig()
+	clientConfig.MaxDatagramBytes=1200
 	clientConfig.RequestTimeout=time.Second
 	clientConfig.RetryInterval=30*time.Millisecond
 	clientConfig.MaxRetries=2
