@@ -140,7 +140,7 @@ func openSecurePayload(key []byte, session uint64, sequence uint64, response boo
 	return aead.Open(nil, nonce[:], wire[4:], aad[:])
 }
 
-// UDPClient sends CALLGRAPH frames inside OCTET frames inside DATAGRAM envelopes.
+// UDPClient sends CALLGRAPH frames inside OCTET, FRG1 and DATAGRAM wire layers.
 // CallOptions preserves the opt-in whole-call retry setting for API compatibility.
 // Fragment retransmission is always enabled and is deduplicated by the message ID.
 type CallOptions struct { RetrySafe bool }
