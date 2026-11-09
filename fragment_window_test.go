@@ -33,21 +33,19 @@ func TestUDPClientSlidingWindowSendsMultipleFragmentsBeforeACK(t *testing.T) {
 	_ = server.SetReadDeadline(time.Now().Add(time.Second))
 	first:=make(map[uint64]bool)
 	var peer *net.UDPAddr
-	for len(first)<2 {
+	// Receive all four fragments before sending any ACK. This proves the
+	// sender no longer waits stop-and-wait for each individual fragment.
+	for len(first)<4 {
 		n,from,e:=server.ReadFromUDP(buf)
-		if e!=nil{t.Fatalf("expected two in-flight fragments before ACK: %v",e)}
+		if e!=nil{t.Fatalf("expected four in-flight fragments before ACK: %v",e)}
 		env,e:=decodeDatagram(buf[:n],1200);if e!=nil{t.Fatal(e)}
+		if env.sequence<1||env.sequence>4{t.Fatalf("unexpected request fragment sequence %d",env.sequence)}
 		first[env.sequence]=true
 		peer=from
 	}
-	if !first[1]||!first[2]{t.Fatalf("expected fragment sequences 1 and 2 in first window, got %v",first)}
-	for _,seq:=range []uint64{1,2} {
+	if len(first)!=4{t.Fatalf("expected all four fragments in flight, got %v",first)}
+	for seq:=uint64(1);seq<=4;seq++ {
 		if err:=writeFragmentACK(server,0x1234,seq,requestAckSequenceBase+seq-1,true,1200,nil,peer);err!=nil{t.Fatal(err)}
 	}
-	n,_,err:=server.ReadFromUDP(buf)
-	if err!=nil{t.Fatalf("third fragment was not released after ACKs: %v",err)}
-	env,err:=decodeDatagram(buf[:n],1200);if err!=nil{t.Fatal(err)}
-	if env.sequence!=3{t.Fatalf("expected third fragment sequence 3, got %d",env.sequence)}
-	if err:=writeFragmentACK(server,0x1234,3,requestAckSequenceBase+2,true,1200,nil,peer);err!=nil{t.Fatal(err)}
 	if err:=<-clientDone;err!=nil{t.Fatal(err)}
 }
