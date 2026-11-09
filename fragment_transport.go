@@ -108,36 +108,38 @@ func (s *UDPServer) transmitMessage(ctx context.Context,conn *net.UDPConn,peer *
 		wire:=plain
 		if len(s.config.PreSharedKey)==32 {wire,err=sealSecurePayload(s.config.PreSharedKey,session,sequence,true,plain);if err!=nil{return}}
 		packet,err:=encodeDatagram(session,sequence,wire,mtu);if err!=nil{return}
-		s.transmitFragment(ctx,conn,peer,session,sequence,packet,path)
+		if !s.transmitFragment(ctx,conn,peer,session,sequence,packet,path) { return }
 	}
 }
 
-func (s *UDPServer) transmitFragment(ctx context.Context,conn *net.UDPConn,peer *net.UDPAddr,session,sequence uint64,packet []byte,path *udpPathState) {
+func (s *UDPServer) transmitFragment(ctx context.Context,conn *net.UDPConn,peer *net.UDPAddr,session,sequence uint64,packet []byte,path *udpPathState) bool {
 	key:=pendingResponseKey{session:session,peer:peer.String(),sequence:sequence}
 	for attempt:=0;attempt<=s.config.MaxRetries;attempt++ {
-		if ctx.Err()!=nil{return}
-		id,err:=path.reserveSend(ctx,len(packet));if err!=nil{return}
+		if ctx.Err()!=nil{return false}
+		id,err:=path.reserveSend(ctx,len(packet));if err!=nil{return false}
 		done:=make(chan struct{})
 		s.pendingMu.Lock()
 		s.pending[key]=pendingResponse{packet:append([]byte(nil),packet...),path:path,congestionID:id,done:done}
 		s.pendingMu.Unlock()
 		if _,err=conn.WriteToUDP(packet,peer);err!=nil {
-			s.pendingMu.Lock();delete(s.pending,key);s.pendingMu.Unlock();path.loss(id);return
+			s.pendingMu.Lock();delete(s.pending,key);s.pendingMu.Unlock();path.loss(id);return false
 		}
 		timer:=time.NewTimer(path.rto())
 		select {
 		case <-done:
-			timer.Stop();return
+			timer.Stop();return true
 		case <-ctx.Done():
 			timer.Stop()
 			s.pendingMu.Lock();delete(s.pending,key);s.pendingMu.Unlock()
-			path.loss(id);return
+			path.loss(id);return false
 		case <-timer.C:
 			s.pendingMu.Lock()
 			entry,exists:=s.pending[key]
 			if exists&&entry.congestionID==id {delete(s.pending,key)}
 			s.pendingMu.Unlock()
-			if exists&&entry.congestionID==id {path.loss(id)}
+			if !exists { return true }
+			if entry.congestionID==id {path.loss(id)}
 		}
 	}
+	return false
 }
