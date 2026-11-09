@@ -24,9 +24,9 @@ func writeFragmentACK(conn *net.UDPConn,session,ackedSequence,ackSequence uint64
 }
 
 func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,path *udpPathState,session uint64,mtu int,message []byte,deadline time.Time) ([][]byte,error) {
-	messageID,err:=randomUint64();if err!=nil{return err};if messageID==0{messageID=1}
+	messageID,err:=randomUint64();if err!=nil{return nil,err};if messageID==0{messageID=1}
 	chunk:=mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey)-fragmentHeaderSize
-	fragments,err:=splitMessage(message,chunk,messageID);if err!=nil{return err}
+	fragments,err:=splitMessage(message,chunk,messageID);if err!=nil{return nil,err}
 	buf:=make([]byte,c.config.MaxDatagramBytes)
 	var earlyResponsePackets [][]byte
 	for _,fragment:=range fragments {
@@ -48,7 +48,7 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 				n,readErr:=conn.Read(buf)
 				if readErr!=nil {
 					if ne,ok:=readErr.(net.Error);ok&&ne.Timeout(){break}
-					path.loss(id);return readErr
+					path.loss(id);return nil,readErr
 				}
 				envelope,decodeErr:=decodeDatagram(buf[:n],c.config.MaxDatagramBytes)
 				if decodeErr!=nil||envelope.session!=session{continue}
