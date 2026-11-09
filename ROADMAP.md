@@ -12,7 +12,10 @@
 - [ ] Cancellation propagation beyond the server-side handler context.
 - [x] ACK1 codec with shared Rust/Go golden wire vector.
 - [x] ACK-driven bounded response retransmission with client ACK generation and server ACK processing.
-- [ ] Integrate congestion control, path MTU discovery and fair scheduling into the Go UDP scheduler.
+- [x] Integrate per-peer congestion window, pacing, RTT/RTO estimation and ACK feedback into the Go UDP scheduler.
+- [x] Integrate per-peer challenge/response path MTU discovery with conservative 1200-byte baseline and 1452-byte ceiling.
+- [ ] Add fragmentation/reassembly for application payloads larger than the discovered path budget.
+- [ ] Add fair scheduling, ECN and multi-path fairness tests.
 - [ ] Add retry-safe request-loss integration tests and bidirectional delivery acknowledgements.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
 - [ ] Streaming/backpressure profile, fuzzing and benchmarks.
