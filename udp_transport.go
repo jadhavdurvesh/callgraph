@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -272,7 +273,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		assembled,complete,addErr:=s.reassembler.Add(reassemblyKey,fragment,time.Now())
 		if addErr!=nil{continue}
 		if !complete {
-			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
+			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 			continue
 		}
 		select {
@@ -280,7 +281,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			accepted,cached:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
-				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
+				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 				if len(cached)>0 {
 					select {case s.workers<-struct{}{}:
 						s.wg.Add(1)
@@ -292,7 +293,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				}
 				continue
 			}
-			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
+			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 			s.wg.Add(1)
 			go func(peer *net.UDPAddr,session,messageID uint64,assembled []byte,path *udpPathState){
 				defer s.wg.Done();defer func(){<-s.workers}()
