@@ -92,12 +92,15 @@ func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPCo
 		ackSequence:=responseAckSequenceBase+uint64(fragment.index)
 		_ = conn.SetWriteDeadline(deadline)
 		_ = writeFragmentACK(conn,session,envelope.sequence,ackSequence,false,mtu,c.config.PreSharedKey,nil)
-		if complete{return assembled,nil}
+		if complete {
+			_ = writeFragmentACK(conn,session,envelope.sequence,ackSequence,false,mtu,c.config.PreSharedKey,nil)
+			return assembled,nil
+		}
 	}
 }
 
-func (s *UDPServer) transmitMessage(ctx context.Context,conn *net.UDPConn,peer *net.UDPAddr,session uint64,message []byte,path *udpPathState) {
-	messageID,err:=randomUint64();if err!=nil{return};if messageID==0{messageID=1}
+func (s *UDPServer) transmitMessage(ctx context.Context,conn *net.UDPConn,peer *net.UDPAddr,session,messageID uint64,message []byte,path *udpPathState) {
+	if messageID==0{return}
 	mtu:=path.currentMTU()
 	chunk:=mtu-datagramHeaderSize-secureOverhead(s.config.PreSharedKey)-fragmentHeaderSize
 	fragments,err:=splitMessage(message,chunk,messageID);if err!=nil{return}
