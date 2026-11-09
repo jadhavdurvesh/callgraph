@@ -248,105 +248,99 @@ func (s *UDPServer) pathFor(peer *net.UDPAddr) *udpPathState {
 
 // Serve runs until ctx is cancelled. It polls the socket so cancellation is bounded.
 func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
-	if conn == nil { return errors.New("callgraph: UDP socket is required") }
-	buf := make([]byte, s.config.MaxDatagramBytes+1)
-	for ctx.Err() == nil {
+	if conn==nil{return errors.New("callgraph: UDP socket is required")}
+	buf:=make([]byte,s.config.MaxDatagramBytes+1)
+	for ctx.Err()==nil {
 		_ = conn.SetReadDeadline(time.Now().Add(s.config.ReadPollInterval))
-		n, peer, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() { continue }
-			if ctx.Err() != nil { break }
-			return err
-		}
-		if n > s.config.MaxDatagramBytes { continue }
-		packet := append([]byte(nil), buf[:n]...)
-		envelope, decodeErr := decodeDatagram(packet, s.config.MaxDatagramBytes)
-		if decodeErr != nil { continue }
-		// Authenticate encrypted packets before allowing them to consume replay-cache
-		// capacity; otherwise unauthenticated traffic could exhaust the bounded cache.
-		plainPayload := envelope.payload
-		if len(s.config.PreSharedKey) == 32 {
-			plainPayload, decodeErr = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, envelope.payload)
-			if decodeErr != nil { continue }
-		} else if s.config.RequireEncryption { continue }
-		path := s.pathFor(peer)
-		if len(plainPayload)>=4 && string(plainPayload[:4])=="MTP1" { s.handleMTUProbe(conn,peer,packet,envelope,plainPayload,path); continue }
-		if bytes.HasPrefix(plainPayload, []byte("ACK1")) {
-			ack, ackErr := DecodeACK(plainPayload)
-			if ackErr == nil { s.acknowledgeResponse(peer, envelope.session, ack) }
+		n,peer,err:=conn.ReadFromUDP(buf)
+		if err!=nil {if ne,ok:=err.(net.Error);ok&&ne.Timeout(){continue};if ctx.Err()!=nil{break};return err}
+		if n>s.config.MaxDatagramBytes{continue}
+		packet:=append([]byte(nil),buf[:n]...)
+		envelope,decodeErr:=decodeDatagram(packet,s.config.MaxDatagramBytes);if decodeErr!=nil{continue}
+		plain:=envelope.payload
+		if len(s.config.PreSharedKey)==32 {plain,decodeErr=openSecurePayload(s.config.PreSharedKey,envelope.session,envelope.sequence,false,envelope.payload);if decodeErr!=nil{continue}} else if s.config.RequireEncryption {continue}
+		path:=s.pathFor(peer)
+		if len(plain)>=4&&string(plain[:4])=="MTP1" {s.handleMTUProbe(conn,peer,packet,envelope,plain,path);continue}
+		if len(plain)>=4&&string(plain[:4])=="ACK1" {
+			ack,ackErr:=DecodeACK(plain);if ackErr==nil{s.acknowledgeResponse(peer,envelope.session,envelope.sequence,ack)}
 			continue
 		}
-		accepted, cached := s.acceptReplay(envelope)
-		if !accepted {
-			if len(cached) > 0 { _, _ = conn.WriteToUDP(cached, peer) }
+		if len(plain)<4||string(plain[:4])!="FRG1"{continue}
+		fragment,fragmentErr:=decodeFragment(plain,s.config.MaxReassemblyBytes);if fragmentErr!=nil{continue}
+		if envelope.sequence!=uint64(fragment.index)+1{continue}
+		reassemblyKey:=peer.String()+"/"+strconv.FormatUint(envelope.session,10)+"/"+strconv.FormatUint(fragment.messageID,10)
+		assembled,complete,addErr:=s.reassembler.Add(reassemblyKey,fragment,time.Now())
+		if addErr!=nil{continue}
+		if !complete {
+			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
 			continue
 		}
 		select {
-		case s.workers <- struct{}{}:
-			s.wg.Add(1)
-			go func(peer *net.UDPAddr, packet []byte, requestEnvelope datagramEnvelope) {
-				defer s.wg.Done()
-				defer func(){ <-s.workers }()
-				if response := s.handlePacket(ctx, packet); len(response) > 0 {
-					s.storeReplayResponse(requestEnvelope, response)
-					s.transmitResponse(ctx, conn, peer, requestEnvelope.session, response, s.pathFor(peer))
+		case s.workers<-struct{}{}:
+			accepted,cached:=s.acceptReplay(envelope.session,fragment.messageID)
+			if !accepted {
+				<-s.workers
+				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
+				if len(cached)>0 {
+					select {case s.workers<-struct{}{}:
+						s.wg.Add(1)
+						go func(peer *net.UDPAddr,session uint64,response []byte,path *udpPathState){
+							defer s.wg.Done();defer func(){<-s.workers}()
+							s.transmitMessage(ctx,conn,peer,session,response,path)
+						}(peer,envelope.session,cached,path)
+					default:}
 				}
-			}(peer, packet, envelope)
+				continue
+			}
+			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey)
+			s.wg.Add(1)
+			go func(peer *net.UDPAddr,session,messageID uint64,assembled []byte,path *udpPathState){
+				defer s.wg.Done();defer func(){<-s.workers}()
+				wire:=assembled
+				if len(s.config.PreSharedKey)==32 {
+					var sealErr error
+					wire,sealErr=sealSecurePayload(s.config.PreSharedKey,session,1,false,assembled)
+					if sealErr!=nil{return}
+				}
+				requestPacket,encodeErr:=encodeDatagram(session,1,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
+				responsePacket:=s.handlePacket(ctx,requestPacket);if len(responsePacket)==0{return}
+				responseEnvelope,decodeErr:=decodeDatagram(responsePacket,s.config.MaxDatagramBytes);if decodeErr!=nil{return}
+				response:=responseEnvelope.payload
+				if len(s.config.PreSharedKey)==32 {
+					response,decodeErr=openSecurePayload(s.config.PreSharedKey,session,2,true,response)
+					if decodeErr!=nil{return}
+				}
+				s.storeReplayResponse(session,messageID,response)
+				s.transmitMessage(ctx,conn,peer,session,response,path)
+			}(peer,envelope.session,fragment.messageID,assembled,path)
 		default:
-			// Bounded overload policy: drop excess datagrams rather than queue
-			// unbounded work or block the socket reader.
+			// Do not acknowledge the final fragment while execution capacity is
+			// exhausted. The sender retries it; the completed assembly is retained.
 		}
 	}
 	s.wg.Wait()
 	return ctx.Err()
 }
 
-// transmitResponse retains a bounded response until the peer acknowledges packet 2.
-// The worker slot remains occupied during this finite retry window, preserving the
-// server's existing concurrency bound.
-func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, session uint64, packet []byte, path *udpPathState) {
-	key := pendingResponseKey{session: session, peer: peer.String()}
-	s.pendingMu.Lock()
-	s.pending[key] = pendingResponse{packet: append([]byte(nil), packet...), path:path}
-	s.pendingMu.Unlock()
-	defer func() {
-		s.pendingMu.Lock()
-		entry, exists := s.pending[key]
-		delete(s.pending, key)
-		s.pendingMu.Unlock()
-		if exists && entry.path != nil && entry.congestionID != 0 { entry.path.loss(entry.congestionID) }
-	}()
-	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
-		if ctx.Err() != nil { return }
-		id, reserveErr := path.reserveSend(ctx,len(packet)); if reserveErr != nil { return }
-		s.pendingMu.Lock(); entry:=s.pending[key]; entry.congestionID=id; s.pending[key]=entry; s.pendingMu.Unlock()
-		if _, err := conn.WriteToUDP(packet, peer); err != nil { path.loss(id); return }
-		timer := time.NewTimer(path.rto())
-		select {
-		case <-ctx.Done():
-			timer.Stop(); return
-		case <-timer.C:
-			path.loss(id)
-		}
-		s.pendingMu.Lock()
-		_, waiting := s.pending[key]
-		s.pendingMu.Unlock()
-		if !waiting { return }
+func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr,session,ackSequence uint64,ack AckFrame) {
+	if ack.Validate()!=nil||ack.LargestAcked<responseDataSequenceBase||
+		ack.LargestAcked>=responseDataSequenceBase+maxMessageFragments||
+		ackSequence!=responseAckSequenceBase+(ack.LargestAcked-responseDataSequenceBase){return}
+	for _,r:=range ack.Ranges {
+		if r.First<responseDataSequenceBase||r.Last>=responseDataSequenceBase+maxMessageFragments{return}
 	}
-}
-
-// acknowledgeResponse removes a pending response only when ACK1 covers packet 2.
-func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr, session uint64, ack AckFrame) {
-	if ack.Validate() != nil || ack.LargestAcked != 2 { return }
-	covered := false
-	for _, r := range ack.Ranges { if r.First <= 2 && r.Last >= 2 { covered = true; break } }
-	if !covered { return }
-	key := pendingResponseKey{session: session, peer: peer.String()}
 	s.pendingMu.Lock()
-	entry,exists:=s.pending[key]
-	delete(s.pending, key)
+	var acknowledged []pendingResponse
+	for key,entry:=range s.pending {
+		if key.session!=session||key.peer!=peer.String()||!ackCovers(ack,key.sequence){continue}
+		delete(s.pending,key)
+		acknowledged=append(acknowledged,entry)
+	}
 	s.pendingMu.Unlock()
-	if exists && entry.path!=nil && entry.congestionID!=0 { entry.path.ack(entry.congestionID) }
+	for _,entry:=range acknowledged {
+		if entry.path!=nil&&entry.congestionID!=0{entry.path.ack(entry.congestionID)}
+		if entry.done!=nil{close(entry.done)}
+	}
 }
 
 func (s *UDPServer) acceptReplay(envelope datagramEnvelope) (bool, []byte) {
