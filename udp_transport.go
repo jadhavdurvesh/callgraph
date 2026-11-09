@@ -301,7 +301,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			s.wg.Add(1)
 			go func(peer *net.UDPAddr,session,messageID uint64,assembled []byte,path *udpPathState){
 				defer s.wg.Done();defer func(){<-s.workers}()
-				response:=s.handleRPCPayload(ctx,session,assembled)
+				response:=s.handleRPCPayload(ctx,assembled)
 				if len(response)==0{s.finishReplayTransmission(session,messageID);return}
 				s.storeReplayResponse(session,messageID,response)
 				s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
@@ -389,10 +389,10 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 		wirePayload,err=openSecurePayload(s.config.PreSharedKey,envelope.session,envelope.sequence,false,wirePayload)
 		if err!=nil{return nil}
 	} else if s.config.RequireEncryption { return nil }
-	return s.handleRPCPayload(parent,envelope.session,wirePayload)
+	return s.handleRPCPayload(parent,wirePayload)
 }
 
-func (s *UDPServer) handleRPCPayload(parent context.Context,session uint64,wirePayload []byte) []byte {
+func (s *UDPServer) handleRPCPayload(parent context.Context,wirePayload []byte) []byte {
 	rpcWire, err := decodeOCTET(wirePayload, s.config.MaxPayloadBytes+FrameHeaderSize)
 	if err != nil { return nil }
 	request, err := DecodeFrame(rpcWire, s.config.MaxPayloadBytes)
