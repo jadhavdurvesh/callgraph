@@ -19,8 +19,9 @@ func TestUDPReplayCacheReturnsPreviouslyGeneratedResponse(t *testing.T) {
 	if accepted,_,_,_,_:=server.acceptReplay(7,3);!accepted{t.Fatal("first message rejected")}
 	response:=[]byte("cached response")
 	server.storeReplayResponse(7,3,response)
-	accepted,cached,_,_,_:=server.acceptReplay(7,3)
-	if accepted{t.Fatal("duplicate should not be re-executed")}
+	server.finishReplayTransmission(7,3)
+	accepted,cached,known,retransmit,busy:=server.acceptReplay(7,3)
+	if accepted||!known||!retransmit||busy{t.Fatal("duplicate should claim cached response retransmission")}
 	if !bytes.Equal(cached,response){t.Fatalf("cached response %q",cached)}
 	cached[0]='X'
 	_,cachedAgain,_,_,_:=server.acceptReplay(7,3)
