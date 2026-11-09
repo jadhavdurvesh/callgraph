@@ -8,7 +8,7 @@ import (
 
 func TestUDPReplayWindowRejectsDuplicateMessageID(t *testing.T) {
 	server:=&UDPServer{config:DefaultUDPConfig(),replay:make(map[replayKey]replayEntry)}
-	if accepted,_,_:=server.acceptReplay(0x1234,11);!accepted{t.Fatal("first message must be accepted")}
+	if accepted,_,_,_:=server.acceptReplay(0x1234,11);!accepted{t.Fatal("first message must be accepted")}
 	if accepted,_:=server.acceptReplay(0x1234,11);accepted{t.Fatal("duplicate message must be rejected")}
 	if accepted,_:=server.acceptReplay(0x1234,12);!accepted{t.Fatal("new message ID must be accepted")}
 	if accepted,_:=server.acceptReplay(0x5678,11);!accepted{t.Fatal("same message ID in new session must be accepted")}
@@ -19,7 +19,7 @@ func TestUDPReplayCacheReturnsPreviouslyGeneratedResponse(t *testing.T) {
 	if accepted,_:=server.acceptReplay(7,3);!accepted{t.Fatal("first message rejected")}
 	response:=[]byte("cached response")
 	server.storeReplayResponse(7,3,response)
-	accepted,cached,_:=server.acceptReplay(7,3)
+	accepted,cached,_,_:=server.acceptReplay(7,3)
 	if accepted{t.Fatal("duplicate should not be re-executed")}
 	if !bytes.Equal(cached,response){t.Fatalf("cached response %q",cached)}
 	cached[0]='X'
@@ -44,8 +44,8 @@ func TestUDPReplayResponseCacheHasByteBudget(t *testing.T) {
 	server.storeReplayResponse(1,1,[]byte("12345"))
 	server.storeReplayResponse(2,1,[]byte("67890"))
 	if server.replayBytes!=5{t.Fatalf("cached %d bytes, want 5",server.replayBytes)}
-	_,cachedFirst,_:=server.acceptReplay(1,1)
+	_,cachedFirst,_,_:=server.acceptReplay(1,1)
 	if len(cachedFirst)!=5{t.Fatalf("first response should remain cached: %q",cachedFirst)}
-	_,cachedSecond,_:=server.acceptReplay(2,1)
+	_,cachedSecond,_,_:=server.acceptReplay(2,1)
 	if len(cachedSecond)!=0{t.Fatalf("second response should not exceed cache budget: %q",cachedSecond)}
 }
