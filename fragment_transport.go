@@ -14,12 +14,12 @@ func ackCovers(ack AckFrame, sequence uint64) bool {
 	return false
 }
 
-func writeFragmentACK(conn *net.UDPConn,session,ackedSequence,ackSequence uint64,responseDirection bool,mtu int,key []byte) error {
+func writeFragmentACK(conn *net.UDPConn,session,ackedSequence,ackSequence uint64,responseDirection bool,mtu int,key []byte,peer *net.UDPAddr) error {
 	wire,err:=(AckFrame{LargestAcked:ackedSequence,Ranges:[]AckRange{{First:ackedSequence,Last:ackedSequence}}}).Encode()
 	if err!=nil{return err}
 	if len(key)==32 { wire,err=sealSecurePayload(key,session,ackSequence,responseDirection,wire);if err!=nil{return err} }
 	packet,err:=encodeDatagram(session,ackSequence,wire,mtu);if err!=nil{return err}
-	_,err=conn.Write(packet)
+	if peer!=nil { _,err=conn.WriteToUDP(packet,peer) } else { _,err=conn.Write(packet) }
 	return err
 }
 
@@ -90,7 +90,7 @@ func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPCo
 		assembled,complete,addErr:=reassembler.Add(key,fragment,time.Now())
 		if addErr!=nil{continue}
 		ackSequence:=responseAckSequenceBase+uint64(fragment.index)
-		_ = writeFragmentACK(conn,session,envelope.sequence,ackSequence,false,mtu,c.config.PreSharedKey)
+		_ = writeFragmentACK(conn,session,envelope.sequence,ackSequence,false,mtu,c.config.PreSharedKey,nil)
 		if complete{return assembled,nil}
 	}
 }
