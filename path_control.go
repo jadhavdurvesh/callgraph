@@ -51,43 +51,6 @@ func newPathCongestion(maxDatagram int) *pathCongestion {
 	}
 }
 
-func (c *pathCongestion) reserve(ctx context.Context, size int) (uint64, error) {
-	if size <= 0 || size > c.maxDatagram { return 0, ErrPayloadTooLarge }
-	for {
-		now := time.Now()
-		// The caller owns ccMu while calling reserve; it releases it while
-		// sleeping so ACK processing can release the congestion window.
-		available := size <= c.cwnd-c.bytesInFlight
-		paced := !now.Before(c.nextSend)
-		if available && paced {
-			if len(c.outstanding) >= 4096 { return 0, errors.New("callgraph: path outstanding-packet limit reached") }
-			id := c.nextID
-			c.nextID++
-			if c.nextID == 0 { c.nextID = 1 }
-			c.outstanding[id] = sentPathPacket{bytes:size, sentAt:now}
-			c.bytesInFlight += size
-			pacing := time.Duration(float64(c.srtt) * float64(size) / float64(max(1,c.cwnd)))
-			if pacing < time.Millisecond { pacing = time.Millisecond }
-			c.nextSend = now.Add(pacing)
-			return id, nil
-		}
-		wait := time.Millisecond
-		if available && c.nextSend.After(now) { wait = min(wait, time.Until(c.nextSend)) }
-		if wait <= 0 { wait = time.Millisecond }
-		timer := time.NewTimer(wait)
-		c.ccUnlockSleep(timer, ctx)
-		return 0, errPathRetry
-	}
-}
-
-var errPathRetry = errors.New("callgraph: retry path send reservation")
-
-// ccUnlockSleep is replaced by udpPathState.reserveSend, which performs the
-// lock/sleep/retry loop. It must never be called while ccMu is held.
-func (c *pathCongestion) ccUnlockSleep(timer *time.Timer, ctx context.Context) {
-	select { case <-ctx.Done(): timer.Stop(); case <-timer.C: }
-}
-
 func (c *pathCongestion) ack(id uint64, now time.Time) {
 	packet, ok := c.outstanding[id]
 	if !ok { return }
