@@ -13,7 +13,7 @@ ACK1 frames travel in DGM1 envelopes in the reverse direction.
 - Typed operation registry, versioned descriptors, request correlation IDs, deadlines, authorization hooks and stable remote error codes.
 - Bounded UDP datagrams, application payloads, concurrent execution, replay entries and response-cache bytes.
 - FRG1 fragmentation and reassembly for requests and responses larger than the current path datagram budget.
-- Independent fragment acknowledgements and bounded retransmission of missing fragments using the adaptive path RTO.
+- Bounded selective-repeat fragment windows (up to 8 fragments in flight), independent ACK processing and retransmission of missing fragments using the adaptive path RTO.
 - Duplicate-fragment suppression and message-ID replay protection; duplicate calls do not execute a completed operation again.
 - Bounded reassembly: 1,024 fragments per message, 8 MiB aggregate reassembly memory and 256 concurrent assemblies by default, with a 15-second assembly expiry.
 - ACK1 codec interoperable with the Rust DATAGRAM implementation, including up to eight bounded acknowledgement ranges.
@@ -25,9 +25,9 @@ ACK1 frames travel in DGM1 envelopes in the reverse direction.
 
 ## Fragmentation profile
 
-Each FRG1 fragment carries a message ID, fragment index/count, total message length, byte offset and fragment data. Fragments are reassembled before the CALLGRAPH frame is decoded or dispatched. The sender waits for each fragment ACK before advancing, and retries an unacknowledged fragment using the current path RTO. See [FRAGMENTATION.md](FRAGMENTATION.md) for the wire layout, sequence allocation and resource limits.
+Each FRG1 fragment carries a message ID, fragment index/count, total message length, byte offset and fragment data. Fragments are reassembled before the CALLGRAPH frame is decoded or dispatched. The sender can keep up to eight fragments in flight, subject to the per-path congestion window and pacing. Each fragment is acknowledged independently and only missing fragments are retransmitted. See [FRAGMENTATION.md](FRAGMENTATION.md) for the wire layout, sequence allocation and resource limits.
 
-The profile is deliberately stop-and-wait at the fragment layer. It supports large bounded messages; it is not yet a streaming or high-throughput sliding-window protocol.
+This is a bounded selective-repeat window, not a streaming protocol. ACK range batching, streaming/backpressure and fair scheduling remain future work.
 
 ## Enabling encryption
 
@@ -53,7 +53,7 @@ The current profile uses a 64-bit random session identifier and direction-separa
 
 ## Limitations and security status
 
-This is an experimental research transport, not a reviewed production transport standard. Fragment transmission is stop-and-wait; streaming, backpressure, sliding-window delivery, ECN, fair scheduling, multi-path fairness, key rotation negotiation, forward secrecy, certificate identity, and a formal threat-model review remain outstanding. MTU discovery is capped at 1,452 bytes. Without PSK encryption, fragment and MTU-probe integrity is not cryptographically authenticated. Response replay caching is in-memory and bounded; process restart loses it. UDP overload can cause packet drops. Do not use this profile for hard real-time or emergency-stop control.
+This is an experimental research transport, not a reviewed production transport standard. Fragment transmission uses a bounded 8-fragment selective-repeat window; streaming, backpressure, ACK range batching, ECN, fair scheduling, multi-path fairness, key rotation negotiation, forward secrecy, certificate identity, and a formal threat-model review remain outstanding. MTU discovery is capped at 1,452 bytes. Without PSK encryption, fragment and MTU-probe integrity is not cryptographically authenticated. Response replay caching is in-memory and bounded; process restart loses it. UDP overload can cause packet drops. Do not use this profile for hard real-time or emergency-stop control.
 
 ## Repositories
 
