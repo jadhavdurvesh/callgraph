@@ -21,6 +21,8 @@ const (
 	kindRequest        = 1
 	kindResponse       = 2
 	kindError          = 3
+	mtuProbeRequestSequence = uint64(0x0fffff00)
+	mtuProbeResponseSequence = uint64(0x0fffff01)
 )
 
 var (
@@ -40,6 +42,9 @@ type UDPConfig struct {
 	MaxConcurrentRequests int
 	MaxReplayEntries int
 	MaxReplayBytes int
+	MaxReassemblyBytes int
+	MaxReassemblyMessages int
+	ReassemblyTimeout time.Duration
 	MaxRetries int
 	RetryInterval time.Duration
 	PreSharedKey []byte
@@ -47,11 +52,11 @@ type UDPConfig struct {
 }
 
 func DefaultUDPConfig() UDPConfig {
-	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond, MaxConcurrentRequests: 128, MaxReplayEntries: 8192, MaxReplayBytes: 8 * 1024 * 1024, MaxRetries: 2, RetryInterval: 250 * time.Millisecond}
+	return UDPConfig{MaxPayloadBytes: 60 * 1024, MaxDatagramBytes: 65_507, RequestTimeout: 5 * time.Second, ReadPollInterval: 100 * time.Millisecond, MaxConcurrentRequests: 128, MaxReplayEntries: 8192, MaxReplayBytes: 8 * 1024 * 1024, MaxReassemblyBytes: 8 * 1024 * 1024, MaxReassemblyMessages: 256, ReassemblyTimeout: 15 * time.Second, MaxRetries: 2, RetryInterval: 250 * time.Millisecond}
 }
 
 func (c UDPConfig) validate() error {
-	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxReplayBytes <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {
+	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxReplayBytes <= 0 || c.MaxReassemblyBytes < c.MaxPayloadBytes+FrameHeaderSize+octetHeaderSize || c.MaxReassemblyMessages <= 0 || c.ReassemblyTimeout <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {
 		return errors.New("callgraph: invalid UDP transport limits")
 	}
 	overhead := datagramHeaderSize + octetHeaderSize + FrameHeaderSize
@@ -266,10 +271,10 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 }
 
 // UDPServer dispatches registered CALLGRAPH operations over the shared wire profiles.
-type replayKey struct { session uint64; sequence uint64 }
+type replayKey struct { session uint64; messageID uint64 }
 type replayEntry struct { expires time.Time; response []byte }
-type pendingResponseKey struct { session uint64; peer string }
-type pendingResponse struct { packet []byte; path *udpPathState; congestionID uint64 }
+type pendingResponseKey struct { session uint64; peer string; sequence uint64 }
+type pendingResponse struct { packet []byte; path *udpPathState; congestionID uint64; done chan struct{} }
 
 type UDPServer struct {
 	runtime *Runtime
@@ -279,6 +284,7 @@ type UDPServer struct {
 	replayMu sync.Mutex
 	replay map[replayKey]replayEntry
 	replayBytes int
+	reassembler *fragmentReassembler
 	pendingMu sync.Mutex
 	pending map[pendingResponseKey]pendingResponse
 	pathsMu sync.Mutex
@@ -290,7 +296,7 @@ type UDPServer struct {
 func NewUDPServer(runtime *Runtime, config UDPConfig) (*UDPServer, error) {
 	if runtime == nil { return nil, errors.New("callgraph: runtime is required") }
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), pending: make(map[pendingResponseKey]pendingResponse), paths: make(map[string]*udpPathState), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
+	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), pending: make(map[pendingResponseKey]pendingResponse), reassembler:newFragmentReassembler(config.MaxReassemblyBytes,config.MaxReassemblyMessages,config.ReassemblyTimeout), paths: make(map[string]*udpPathState), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
 }
 
 func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handler Handler) error {
