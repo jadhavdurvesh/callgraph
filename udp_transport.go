@@ -168,105 +168,32 @@ func (c *UDPClient) pathFor(address string) *udpPathState {
 }
 
 func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte, options CallOptions) ([]byte, error) {
-	if len(payload) > c.config.MaxPayloadBytes { return nil, ErrPayloadTooLarge }
-	remote, err := net.ResolveUDPAddr("udp", address)
-	if err != nil { return nil, err }
-	conn, err := net.DialUDP("udp", nil, remote)
-	if err != nil { return nil, err }
-	defer conn.Close()
-
-	path := c.pathFor(remote.String())
-
-	budget := c.config.RequestTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining <= 0 { return nil, context.DeadlineExceeded }
-		if remaining < budget { budget = remaining }
-	}
-	if err := ctx.Err(); err != nil { return nil, err }
-	requestID, err := random16()
-	if err != nil { return nil, err }
-	session, err := randomUint64()
-	if err != nil { return nil, err }
-
-	// Discover a conservative path datagram size before sending application data.
-	mtu := path.discoverMTU(ctx, conn, c.config, time.Now().Add(min(budget, 2*c.config.RetryInterval)))
-	frame, err := EncodeFrame(Frame{Kind: kindRequest, RequestID: requestID, OperationID: operationID, Major: major, Minor: minor, DeadlineMillis: durationMillis(budget), Payload: payload}, c.config.MaxPayloadBytes)
-	if err != nil { return nil, err }
-	octets, err := encodeOCTET(frame, mtu-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
-	if err != nil { return nil, err }
-	wirePayload := octets
-	if len(c.config.PreSharedKey) == 32 {
-		wirePayload, err = sealSecurePayload(c.config.PreSharedKey, session, 1, false, octets)
-		if err != nil { return nil, err }
-	}
-	packet, err := encodeDatagram(session, 1, wirePayload, mtu)
-	if err != nil { return nil, err }
-	requestPathID, err := path.reserveSend(ctx,len(packet))
-	if err != nil { return nil,err }
-	requestAcknowledged := false
-	defer func(){ if !requestAcknowledged { path.loss(requestPathID) } }()
-
-	deadline := time.Now().Add(budget)
-	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) { deadline = parentDeadline }
-	buf := make([]byte, c.config.MaxDatagramBytes)
-	var n int
-	var envelope datagramEnvelope
-	attempt := 0
-	for {
-		if err := ctx.Err(); err != nil { return nil, err }
-		now := time.Now()
-		if !now.Before(deadline) { return nil, context.DeadlineExceeded }
-		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
-		attemptDeadline := deadline
-		if sendAttempt {
-			attemptDeadline = now.Add(path.rto())
-			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
-		}
-		if err := conn.SetDeadline(attemptDeadline); err != nil { path.loss(requestPathID); return nil, err }
-		if sendAttempt {
-			if _, err := conn.Write(packet); err != nil { path.loss(requestPathID); return nil, err }
-		}
-		n, err = conn.Read(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() { attempt++; if attempt > c.config.MaxRetries || !options.RetrySafe { path.loss(requestPathID) }; continue }
-			return nil, err
-		}
-		envelope, err = decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
-		if err != nil || envelope.session != session || envelope.sequence != 2 { continue }
-		wirePayload = envelope.payload
-		if len(c.config.PreSharedKey) == 32 {
-			wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, envelope.sequence, true, wirePayload)
-			if err != nil { continue }
-		}
-		if bytes.HasPrefix(wirePayload, []byte("ACK1")) { continue }
-		break
-	}
-	rpcWire, err := decodeOCTET(wirePayload, c.config.MaxDatagramBytes)
-	if err != nil { return nil, err }
-	response, err := DecodeFrame(rpcWire, c.config.MaxPayloadBytes)
-	if err != nil { return nil, err }
-	if response.RequestID != requestID { return nil, ErrMalformedFrame }
-	// The response proves the request reached the peer; release its in-flight budget.
-	path.ack(requestPathID)
-	requestAcknowledged = true
-	// ACK the response packet so the server can stop its bounded retransmission timer.
-	ackWire, err := (AckFrame{LargestAcked: envelope.sequence, Ranges: []AckRange{{First: envelope.sequence, Last: envelope.sequence}}}).Encode()
-	if err == nil {
-		if len(c.config.PreSharedKey) == 32 { ackWire, err = sealSecurePayload(c.config.PreSharedKey, session, envelope.sequence, false, ackWire) }
-		if err == nil {
-			if ackPacket, encodeErr := encodeDatagram(session, envelope.sequence, ackWire, mtu); encodeErr == nil { _, _ = conn.Write(ackPacket) }
-		}
-	}
+	if len(payload)>c.config.MaxPayloadBytes{return nil,ErrPayloadTooLarge}
+	remote,err:=net.ResolveUDPAddr("udp",address);if err!=nil{return nil,err}
+	conn,err:=net.DialUDP("udp",nil,remote);if err!=nil{return nil,err};defer conn.Close()
+	path:=c.pathFor(remote.String())
+	budget:=c.config.RequestTimeout
+	if deadline,ok:=ctx.Deadline();ok {remaining:=time.Until(deadline);if remaining<=0{return nil,context.DeadlineExceeded};if remaining<budget{budget=remaining}}
+	if err:=ctx.Err();err!=nil{return nil,err}
+	requestID,err:=random16();if err!=nil{return nil,err}
+	session,err:=randomUint64();if err!=nil{return nil,err}
+	deadline:=time.Now().Add(budget)
+	if parentDeadline,ok:=ctx.Deadline();ok&&parentDeadline.Before(deadline){deadline=parentDeadline}
+	mtu:=path.discoverMTU(ctx,conn,c.config,time.Now().Add(min(budget,2*c.config.RetryInterval)))
+	frame,err:=EncodeFrame(Frame{Kind:kindRequest,RequestID:requestID,OperationID:operationID,Major:major,Minor:minor,DeadlineMillis:durationMillis(budget),Payload:payload},c.config.MaxPayloadBytes)
+	if err!=nil{return nil,err}
+	octets,err:=encodeOCTET(frame,c.config.MaxPayloadBytes+FrameHeaderSize);if err!=nil{return nil,err}
+	if err=c.sendRequestFragments(ctx,conn,path,session,mtu,octets,deadline);err!=nil{return nil,err}
+	responseWire,err:=c.receiveResponseFragments(ctx,conn,session,mtu);if err!=nil{return nil,err}
+	rpcWire,err:=decodeOCTET(responseWire,c.config.MaxPayloadBytes+FrameHeaderSize);if err!=nil{return nil,err}
+	response,err:=DecodeFrame(rpcWire,c.config.MaxPayloadBytes);if err!=nil{return nil,err}
+	if response.RequestID!=requestID{return nil,ErrMalformedFrame}
 	switch response.Kind {
-	case kindResponse:
-		return response.Payload, nil
+	case kindResponse:return response.Payload,nil
 	case kindError:
-		code, message, decodeErr := DecodeErrorPayload(response.Payload)
-		if decodeErr != nil { return nil, decodeErr }
-		return nil, &RemoteError{Code: code, Message: message}
-	default:
-		return nil, ErrUnexpectedMessage
+		code,message,decodeErr:=DecodeErrorPayload(response.Payload);if decodeErr!=nil{return nil,decodeErr}
+		return nil,&RemoteError{Code:code,Message:message}
+	default:return nil,ErrUnexpectedMessage
 	}
 }
 
