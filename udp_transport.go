@@ -213,7 +213,7 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
 		attemptDeadline := deadline
 		if sendAttempt {
-			attemptDeadline = now.Add(c.config.RetryInterval)
+			attemptDeadline = now.Add(path.rto())
 			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
 		}
 		if err := conn.SetDeadline(attemptDeadline); err != nil { path.loss(requestPathID); return nil, err }
@@ -384,7 +384,7 @@ func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, pee
 		s.pendingMu.Lock(); entry:=s.pending[key]; entry.congestionID=id; s.pending[key]=entry; s.pendingMu.Unlock()
 		if _, err := conn.WriteToUDP(packet, peer); err != nil { path.loss(id); return }
 		if attempt == s.config.MaxRetries { return }
-		timer := time.NewTimer(s.config.RetryInterval)
+		timer := time.NewTimer(path.rto())
 		select {
 		case <-ctx.Done():
 			timer.Stop(); return
