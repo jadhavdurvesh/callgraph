@@ -11,7 +11,9 @@
 - [x] Initial structured error payload and stable remote error codes (1001–1005, 1500).
 - [ ] Cancellation propagation beyond the server-side handler context.
 - [x] ACK1 codec with shared Rust/Go golden wire vector.
-- [ ] Integrate ACK generation/processing, congestion control, MTU discovery and fair scheduling.
+- [x] ACK-driven bounded response retransmission with client ACK generation and server ACK processing.
+- [ ] Integrate congestion control, path MTU discovery and fair scheduling into the Go UDP scheduler.
+- [ ] Add retry-safe request-loss integration tests and bidirectional delivery acknowledgements.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
 - [ ] Streaming/backpressure profile, fuzzing and benchmarks.
 
