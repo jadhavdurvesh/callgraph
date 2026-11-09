@@ -62,7 +62,7 @@ func (r *StreamReader) Close() error {
 func (r *StreamReader) CloseWithError(cause error) error {
 	if r==nil||r.pipe==nil{return nil}
 	var err error
-	r.once.Do(func(){err=r.pipe.CloseWithError(cause);r.stop();close(r.done)})
+	r.once.Do(func(){err=r.pipe.CloseWithError(cause);r.stop();r.doneOnce.Do(func(){close(r.done)})})
 	return err
 }
 
@@ -74,13 +74,13 @@ func (w *StreamWriter) Write(p []byte) (int,error) {
 func (w *StreamWriter) Close() error {
 	if w==nil||w.pipe==nil{return nil}
 	var err error
-	w.once.Do(func(){err=w.pipe.Close();w.stop();w.doneOnce.Do(func(){close(w.done)})})
+	w.once.Do(func(){err=w.pipe.Close();w.doneOnce.Do(func(){close(w.done)})})
 	return err
 }
 
 func (w *StreamWriter) CloseWithError(cause error) error {
 	if w==nil||w.pipe==nil{return nil}
 	var err error
-	w.once.Do(func(){err=w.pipe.CloseWithError(cause);w.stop();close(w.done)})
+	w.once.Do(func(){err=w.pipe.CloseWithError(cause);w.doneOnce.Do(func(){close(w.done)})})
 	return err
 }
