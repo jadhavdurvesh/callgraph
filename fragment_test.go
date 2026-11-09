@@ -12,7 +12,8 @@ func TestFragmentSplitAndReassembleOutOfOrder(t *testing.T) {
 	r:=newFragmentReassembler(1<<20,8,time.Minute)
 	var got []byte
 	for i:=len(fragments)-1;i>=0;i-- {
-		got,complete,err:=r.Add("peer/session/message",fragments[i],time.Now())
+		var complete bool
+		got,complete,err=r.Add("peer/session/message",fragments[i],time.Now())
 		if err!=nil{t.Fatal(err)}
 		if complete && !bytes.Equal(got,input){t.Fatal("reassembled message differs")}
 	}
