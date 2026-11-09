@@ -273,13 +273,17 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		}
 		select {
 		case s.workers<-struct{}{}:
-			accepted,cached:=s.acceptReplay(envelope.session,fragment.messageID)
+			accepted,cached,known:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
 				if len(cached)==0 {
 					// The original execution may still be running, or the replay
 					// cache may be full. Do not ACK completion until a response is
 					// cached; the sender will retry this final fragment.
+					continue
+				}
+				if len(cached)==0 {
+					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					continue
 				}
 				select {case s.workers<-struct{}{}:
@@ -337,20 +341,20 @@ func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr,session,ackSequence ui
 	}
 }
 
-func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte) {
+func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte,bool) {
 	now:=time.Now()
 	key:=replayKey{session:session,messageID:messageID}
 	s.replayMu.Lock();defer s.replayMu.Unlock()
 	if entry,exists:=s.replay[key];exists {
-		if now.Before(entry.expires){return false,append([]byte(nil),entry.response...)}
+		if now.Before(entry.expires){return false,append([]byte(nil),entry.response...),true}
 		s.replayBytes-=len(entry.response);delete(s.replay,key)
 	}
 	if len(s.replay)>=s.config.MaxReplayEntries {
 		for k,entry:=range s.replay {if !now.Before(entry.expires){s.replayBytes-=len(entry.response);delete(s.replay,k)}}
-		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil}
+		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil,false}
 	}
 	s.replay[key]=replayEntry{expires:now.Add(2*s.config.RequestTimeout)}
-	return true,nil
+	return true,nil,false
 }
 
 func (s *UDPServer) storeReplayResponse(session,messageID uint64,response []byte) {
