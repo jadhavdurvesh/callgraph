@@ -90,6 +90,7 @@ func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPCo
 		assembled,complete,addErr:=reassembler.Add(key,fragment,time.Now())
 		if addErr!=nil{continue}
 		ackSequence:=responseAckSequenceBase+uint64(fragment.index)
+		_ = conn.SetWriteDeadline(deadline)
 		_ = writeFragmentACK(conn,session,envelope.sequence,ackSequence,false,mtu,c.config.PreSharedKey,nil)
 		if complete{return assembled,nil}
 	}
