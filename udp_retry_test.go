@@ -40,22 +40,25 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 	go func(){
 		buf:=make([]byte,65507)
 		for {
-			n,peer,e:=proxy.ReadFromUDP(buf); if e!=nil {proxyDone<-e;return}
+			n,peer,e:=proxy.ReadFromUDP(buf);if e!=nil{proxyDone<-e;return}
 			packet:=append([]byte(nil),buf[:n]...)
-			env,decodeErr:=decodeDatagram(packet,65507); if decodeErr!=nil {proxyDone<-decodeErr;return}
-			if env.sequence==mtuProbeRequestSequence { // forward MTU probes and their challenge responses transparently
+			env,decodeErr:=decodeDatagram(packet,65507);if decodeErr!=nil{proxyDone<-decodeErr;return}
+			if env.sequence==mtuProbeRequestSequence {
 				if _,e=upstream.Write(packet);e!=nil{proxyDone<-e;return}
 				n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
 				if _,e=proxy.WriteToUDP(buf[:n],peer);e!=nil{proxyDone<-e;return}
 				continue
 			}
 			if _,e=upstream.Write(packet);e!=nil{proxyDone<-e;return}
-			if _,e=upstream.Read(buf);e!=nil{proxyDone<-e;return} // intentionally drop first application response
+			// Drop the first response fragment. The server must retransmit
+			// that same fragment until its fragment-level ACK is received.
+			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
+			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
+			if _,e=proxy.WriteToUDP(buf[:n],peer);e!=nil{proxyDone<-e;return}
 			n,peer2,e:=proxy.ReadFromUDP(buf);if e!=nil{proxyDone<-e;return}
 			if peer2.String()!=peer.String(){proxyDone<-context.Canceled;return}
 			if _,e=upstream.Write(buf[:n]);e!=nil{proxyDone<-e;return}
-			n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
-			_,e=proxy.WriteToUDP(buf[:n],peer);proxyDone<-e;return
+			proxyDone<-nil;return
 		}
 	}()
 	clientConfig:=DefaultUDPConfig()
