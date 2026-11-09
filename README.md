@@ -29,6 +29,10 @@ Each FRG1 fragment carries a message ID, fragment index/count, total message len
 
 This is a bounded selective-repeat window, not a streaming protocol. ACK range batching, streaming/backpressure and fair scheduling remain future work.
 
+## Streaming API groundwork
+
+CALLGRAPH also exposes a transport-independent `NewStreamPipe(ctx)` API for incremental in-process byte transfer with synchronous backpressure and context cancellation. This is groundwork for streaming handlers; it is not yet integrated into the UDP wire protocol, which still uses bounded whole-message reassembly. See [STREAMING.md](STREAMING.md) for its scope and limitations.
+
 ## Enabling encryption
 
 Configure both peers with the same 32-byte key. For the interoperability server:
