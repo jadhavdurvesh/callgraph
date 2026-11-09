@@ -287,8 +287,8 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 					// cached; the sender will retry this final fragment.
 					continue
 				}
-				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 				select {case s.workers<-struct{}{}:
+					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					s.wg.Add(1)
 					go func(peer *net.UDPAddr,session uint64,response []byte,path *udpPathState){
 						defer s.wg.Done();defer func(){<-s.workers}()
