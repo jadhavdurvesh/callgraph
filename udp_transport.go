@@ -281,16 +281,20 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			accepted,cached:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
-				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
-				if len(cached)>0 {
-					select {case s.workers<-struct{}{}:
-						s.wg.Add(1)
-						go func(peer *net.UDPAddr,session uint64,response []byte,path *udpPathState){
-							defer s.wg.Done();defer func(){<-s.workers}()
-							s.transmitMessage(ctx,conn,peer,session,response,path)
-						}(peer,envelope.session,cached,path)
-					default:}
+				if len(cached)==0 {
+					// The original execution may still be running, or the replay
+					// cache may be full. Do not ACK completion until a response is
+					// cached; the sender will retry this final fragment.
+					continue
 				}
+				_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
+				select {case s.workers<-struct{}{}:
+					s.wg.Add(1)
+					go func(peer *net.UDPAddr,session uint64,response []byte,path *udpPathState){
+						defer s.wg.Done();defer func(){<-s.workers}()
+						s.transmitMessage(ctx,conn,peer,session,response,path)
+					}(peer,envelope.session,cached,path)
+				default:}
 				continue
 			}
 			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
