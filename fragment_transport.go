@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -27,48 +28,113 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 	messageID,err:=randomUint64();if err!=nil{return nil,err};if messageID==0{messageID=1}
 	chunk:=mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey)-fragmentHeaderSize
 	fragments,err:=splitMessage(message,chunk,messageID);if err!=nil{return nil,err}
-	buf:=make([]byte,c.config.MaxDatagramBytes)
-	var earlyResponsePackets [][]byte
-	for _,fragment:=range fragments {
-		plain,err:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey));if err!=nil{return nil,err}
+	sendCtx,cancel:=context.WithDeadline(ctx,deadline);defer cancel()
+
+	type fragmentJob struct { packet []byte; sequence uint64; ackSequence uint64; acked chan struct{} }
+	jobs:=make([]fragmentJob,len(fragments))
+	for i,fragment:=range fragments {
+		plain,e:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey));if e!=nil{return nil,e}
 		sequence:=uint64(fragment.index)+1
 		wire:=plain
-		if len(c.config.PreSharedKey)==32 {wire,err=sealSecurePayload(c.config.PreSharedKey,session,sequence,false,plain);if err!=nil{return nil,err}}
-		packet,err:=encodeDatagram(session,sequence,wire,mtu);if err!=nil{return nil,err}
-		ackSequence:=requestAckSequenceBase+uint64(fragment.index)
-		acknowledged:=false
-		for attempt:=0;attempt<=c.config.MaxRetries;attempt++ {
-			if err:=ctx.Err();err!=nil{return nil,err}
-			if !time.Now().Before(deadline){return nil,context.DeadlineExceeded}
-			id,err:=path.reserveSend(ctx,len(packet));if err!=nil{return nil,err}
-			attemptDeadline:=time.Now().Add(path.rto());if attemptDeadline.After(deadline){attemptDeadline=deadline}
-			if err=conn.SetDeadline(attemptDeadline);err!=nil{path.loss(id);return nil,err}
-			if _,err=conn.Write(packet);err!=nil{path.loss(id);return nil,err}
-			for {
-				n,readErr:=conn.Read(buf)
-				if readErr!=nil {
-					if ne,ok:=readErr.(net.Error);ok&&ne.Timeout(){break}
-					path.loss(id);return nil,readErr
-				}
-				envelope,decodeErr:=decodeDatagram(buf[:n],c.config.MaxDatagramBytes)
-				if decodeErr!=nil||envelope.session!=session{continue}
-				if envelope.sequence>=responseDataSequenceBase&&envelope.sequence<responseDataSequenceBase+maxMessageFragments {
-					earlyResponsePackets=append(earlyResponsePackets,append([]byte(nil),buf[:n]...))
-					continue
-				}
-				if envelope.sequence!=ackSequence{continue}
-				ackPayload:=envelope.payload
-				if len(c.config.PreSharedKey)==32 {ackPayload,decodeErr=openSecurePayload(c.config.PreSharedKey,session,ackSequence,true,ackPayload);if decodeErr!=nil{continue}}
-				ack,decodeErr:=DecodeACK(ackPayload)
-				if decodeErr!=nil||!ackCovers(ack,sequence){continue}
-				path.ack(id);acknowledged=true;break
-			}
-			if acknowledged {break}
-			path.loss(id)
-		}
-		if !acknowledged{return nil,errors.New("callgraph: request fragment acknowledgement limit reached")}
+		if len(c.config.PreSharedKey)==32 {wire,e=sealSecurePayload(c.config.PreSharedKey,session,sequence,false,plain);if e!=nil{return nil,e}}
+		packet,e:=encodeDatagram(session,sequence,wire,mtu);if e!=nil{return nil,e}
+		jobs[i]=fragmentJob{packet:packet,sequence:sequence,ackSequence:requestAckSequenceBase+uint64(fragment.index),acked:make(chan struct{})}
 	}
-	return earlyResponsePackets,nil
+
+	var mu sync.Mutex
+	outstanding:=make(map[uint64]uint64) // data sequence -> congestion controller ID
+	responses:=make(chan []byte,maxMessageFragments)
+	readerDone:=make(chan struct{})
+	var readerErr error
+	go func(){
+		defer close(readerDone)
+		buf:=make([]byte,c.config.MaxDatagramBytes)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(c.config.ReadPollInterval))
+			n,e:=conn.Read(buf)
+			if e!=nil {
+				if ne,ok:=e.(net.Error);ok&&ne.Timeout(){if sendCtx.Err()!=nil{return};continue}
+				readerErr=e;return
+			}
+			packet:=append([]byte(nil),buf[:n]...)
+			envelope,e:=decodeDatagram(packet,c.config.MaxDatagramBytes)
+			if e!=nil||envelope.session!=session{continue}
+			if envelope.sequence>=responseDataSequenceBase&&envelope.sequence<responseDataSequenceBase+maxMessageFragments {
+				select {case responses<-packet:default:}
+				continue
+			}
+			if envelope.sequence<requestAckSequenceBase||envelope.sequence>=requestAckSequenceBase+maxMessageFragments{continue}
+			index:=envelope.sequence-requestAckSequenceBase
+			ackPayload:=envelope.payload
+			if len(c.config.PreSharedKey)==32 {ackPayload,e=openSecurePayload(c.config.PreSharedKey,session,envelope.sequence,true,ackPayload);if e!=nil{continue}}
+			ack,e:=DecodeACK(ackPayload)
+			if e!=nil||!ackCovers(ack,index+1){continue}
+			mu.Lock()
+			id,ok:=outstanding[index+1]
+			if ok {
+				delete(outstanding,index+1)
+				path.ack(id)
+				close(jobs[index].acked)
+			}
+			mu.Unlock()
+		}
+	}()
+
+	const sendWindow=8
+	sem:=make(chan struct{},sendWindow)
+	results:=make(chan error,len(jobs))
+	var wg sync.WaitGroup
+	for i:=range jobs {
+		job:=jobs[i]
+		wg.Add(1)
+		go func(){
+			defer wg.Done()
+			select {case sem<-struct{}{}:case <-sendCtx.Done():results<-sendCtx.Err();return}
+			defer func(){<-sem}()
+			var result error
+			for attempt:=0;attempt<=c.config.MaxRetries;attempt++ {
+				if err:=sendCtx.Err();err!=nil{result=err;break}
+				id,e:=path.reserveSend(sendCtx,len(job.packet));if e!=nil{result=e;break}
+				mu.Lock();outstanding[job.sequence]=id;mu.Unlock()
+				if _,e=conn.Write(job.packet);e!=nil {
+					mu.Lock();delete(outstanding,job.sequence);mu.Unlock();path.loss(id);result=e;break
+				}
+				timer:=time.NewTimer(path.rto())
+				select {
+				case <-job.acked:
+					if !timer.Stop(){select{case <-timer.C:default:}}
+					result=nil;attempt=c.config.MaxRetries+1
+				case <-timer.C:
+					mu.Lock()
+					current,ok:=outstanding[job.sequence]
+					if ok&&current==id{delete(outstanding,job.sequence)}
+					mu.Unlock()
+					if ok&&current==id{path.loss(id)}
+					if attempt==c.config.MaxRetries{result=errors.New("callgraph: request fragment acknowledgement limit reached")}
+				case <-sendCtx.Done():
+					if !timer.Stop(){select{case <-timer.C:default:}}
+					mu.Lock();current,ok:=outstanding[job.sequence];if ok&&current==id{delete(outstanding,job.sequence)};mu.Unlock()
+					if ok&&current==id{path.loss(id)}
+					result=sendCtx.Err();attempt=c.config.MaxRetries+1
+				case <-readerDone:
+					if !timer.Stop(){select{case <-timer.C:default:}}
+					result=readerErr;if result==nil{result=errors.New("callgraph: UDP response reader stopped")}
+					attempt=c.config.MaxRetries+1
+				}
+				if result==nil {break}
+			}
+			results<-result
+		}()
+	}
+	var firstErr error
+	for range jobs {if e:=<-results;e!=nil&&firstErr==nil{firstErr=e;cancel()}}
+	wg.Wait()
+	cancel()
+	<-readerDone
+	if firstErr!=nil{return nil,firstErr}
+	if readerErr!=nil{return nil,readerErr}
+	early:=make([][]byte,0,len(responses))
+	for {select{case packet:=<-responses:early=append(early,packet);default:return early,nil}}
 }
 
 func (c *UDPClient) receiveResponseFragments(ctx context.Context,conn *net.UDPConn,session uint64,mtu int,deadline time.Time,early [][]byte) ([]byte,error) {
@@ -115,15 +181,25 @@ func (s *UDPServer) transmitMessage(ctx context.Context,conn *net.UDPConn,peer *
 	mtu:=path.currentMTU()
 	chunk:=mtu-datagramHeaderSize-secureOverhead(s.config.PreSharedKey)-fragmentHeaderSize
 	fragments,err:=splitMessage(message,chunk,messageID);if err!=nil{return}
+	const sendWindow=8
+	sem:=make(chan struct{},sendWindow)
+	var wg sync.WaitGroup
 	for _,fragment:=range fragments {
-		if ctx.Err()!=nil{return}
-		plain,err:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(s.config.PreSharedKey));if err!=nil{return}
+		if ctx.Err()!=nil{break}
+		plain,e:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(s.config.PreSharedKey));if e!=nil{break}
 		sequence:=responseDataSequenceBase+uint64(fragment.index)
 		wire:=plain
-		if len(s.config.PreSharedKey)==32 {wire,err=sealSecurePayload(s.config.PreSharedKey,session,sequence,true,plain);if err!=nil{return}}
-		packet,err:=encodeDatagram(session,sequence,wire,mtu);if err!=nil{return}
-		if !s.transmitFragment(ctx,conn,peer,session,sequence,packet,path) { return }
+		if len(s.config.PreSharedKey)==32 {wire,e=sealSecurePayload(s.config.PreSharedKey,session,sequence,true,plain);if e!=nil{break}}
+		packet,e:=encodeDatagram(session,sequence,wire,mtu);if e!=nil{break}
+		select {case sem<-struct{}{}:case <-ctx.Done():break}
+		if ctx.Err()!=nil{break}
+		wg.Add(1)
+		go func(sequence uint64,packet []byte){
+			defer wg.Done();defer func(){<-sem}()
+			s.transmitFragment(ctx,conn,peer,session,sequence,packet,path)
+		}(sequence,packet)
 	}
+	wg.Wait()
 }
 
 func (s *UDPServer) transmitFragment(ctx context.Context,conn *net.UDPConn,peer *net.UDPAddr,session,sequence uint64,packet []byte,path *udpPathState) bool {
