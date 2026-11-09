@@ -24,7 +24,6 @@ const (
 	kindError          = 3
 	mtuProbeRequestSequence = uint64(0x0fffff00)
 	mtuProbeResponseSequence = uint64(0x0fffff01)
-	assembledRequestSequence = uint64(0x0fffff02)
 )
 
 var (
@@ -302,14 +301,8 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			s.wg.Add(1)
 			go func(peer *net.UDPAddr,session,messageID uint64,assembled []byte,path *udpPathState){
 				defer s.wg.Done();defer func(){<-s.workers}()
-				wire:=assembled
-				if len(s.config.PreSharedKey)==32 {
-					var sealErr error
-					wire,sealErr=sealSecurePayload(s.config.PreSharedKey,session,assembledRequestSequence,false,assembled)
-					if sealErr!=nil{s.finishReplayTransmission(session,messageID);return}
-				}
-				requestPacket,encodeErr:=encodeDatagram(session,assembledRequestSequence,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{s.finishReplayTransmission(session,messageID);return}
-				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{s.finishReplayTransmission(session,messageID);return}
+				response:=s.handleRPCPayload(ctx,session,assembled)
+				if len(response)==0{s.finishReplayTransmission(session,messageID);return}
 				s.storeReplayResponse(session,messageID,response)
 				s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
 				s.finishReplayTransmission(session,messageID)
@@ -389,13 +382,17 @@ func (s *UDPServer) finishReplayTransmission(session,messageID uint64) {
 }
 
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
-	envelope, err := decodeDatagram(packet, s.config.MaxDatagramBytes)
-	if err != nil { return nil }
-	wirePayload := envelope.payload
-	if len(s.config.PreSharedKey) == 32 {
-		wirePayload, err = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, wirePayload)
-		if err != nil { return nil }
+	envelope,err:=decodeDatagram(packet,s.config.MaxDatagramBytes)
+	if err!=nil{return nil}
+	wirePayload:=envelope.payload
+	if len(s.config.PreSharedKey)==32 {
+		wirePayload,err=openSecurePayload(s.config.PreSharedKey,envelope.session,envelope.sequence,false,wirePayload)
+		if err!=nil{return nil}
 	} else if s.config.RequireEncryption { return nil }
+	return s.handleRPCPayload(parent,envelope.session,wirePayload)
+}
+
+func (s *UDPServer) handleRPCPayload(parent context.Context,session uint64,wirePayload []byte) []byte {
 	rpcWire, err := decodeOCTET(wirePayload, s.config.MaxPayloadBytes+FrameHeaderSize)
 	if err != nil { return nil }
 	request, err := DecodeFrame(rpcWire, s.config.MaxPayloadBytes)
@@ -433,6 +430,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	if err != nil { return nil }
 	return octets
 }
+
 
 func secureOverhead(key []byte) int { if len(key)==32 { return 20 }; return 0 }
 
