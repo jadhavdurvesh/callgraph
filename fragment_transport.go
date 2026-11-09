@@ -30,11 +30,11 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 	buf:=make([]byte,c.config.MaxDatagramBytes)
 	var earlyResponsePackets [][]byte
 	for _,fragment:=range fragments {
-		plain,err:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey));if err!=nil{return err}
+		plain,err:=encodeFragment(fragment,mtu-datagramHeaderSize-secureOverhead(c.config.PreSharedKey));if err!=nil{return nil,err}
 		sequence:=uint64(fragment.index)+1
 		wire:=plain
-		if len(c.config.PreSharedKey)==32 {wire,err=sealSecurePayload(c.config.PreSharedKey,session,sequence,false,plain);if err!=nil{return err}}
-		packet,err:=encodeDatagram(session,sequence,wire,mtu);if err!=nil{return err}
+		if len(c.config.PreSharedKey)==32 {wire,err=sealSecurePayload(c.config.PreSharedKey,session,sequence,false,plain);if err!=nil{return nil,err}}
+		packet,err:=encodeDatagram(session,sequence,wire,mtu);if err!=nil{return nil,err}
 		ackSequence:=requestAckSequenceBase+uint64(fragment.index)
 		acknowledged:=false
 		for attempt:=0;attempt<=c.config.MaxRetries;attempt++ {
