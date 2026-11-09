@@ -113,6 +113,7 @@ func (p *udpPathState) setPeerMTU(size int) {
 }
 
 func (p *udpPathState) reserveSend(ctx context.Context, size int) (uint64,error) {
+	if size<=0 || size>p.cc.maxDatagram { return 0,ErrPayloadTooLarge }
 	for {
 		p.ccMu.Lock()
 		c:=p.cc
