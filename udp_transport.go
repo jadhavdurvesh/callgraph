@@ -141,11 +141,11 @@ func openSecurePayload(key []byte, session uint64, sequence uint64, response boo
 
 // UDPClient sends CALLGRAPH frames inside OCTET frames inside DATAGRAM envelopes.
 type CallOptions struct { RetrySafe bool }
-type UDPClient struct { config UDPConfig }
+type UDPClient struct { config UDPConfig; pathsMu sync.Mutex; paths map[string]*udpPathState }
 
 func NewUDPClient(config UDPConfig) (*UDPClient, error) {
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPClient{config: config}, nil
+	return &UDPClient{config: config, paths: make(map[string]*udpPathState)}, nil
 }
 
 func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte) ([]byte, error) {
@@ -154,6 +154,14 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 
 // CallWithOptions retransmits only when the caller explicitly declares the
 // operation retry-safe. Non-idempotent operations must not be retried blindly.
+func (c *UDPClient) pathFor(address string) *udpPathState {
+	c.pathsMu.Lock()
+	defer c.pathsMu.Unlock()
+	path := c.paths[address]
+	if path == nil { path = newUDPPathState(c.config.MaxDatagramBytes); c.paths[address] = path }
+	return path
+}
+
 func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte, options CallOptions) ([]byte, error) {
 	if len(payload) > c.config.MaxPayloadBytes { return nil, ErrPayloadTooLarge }
 	remote, err := net.ResolveUDPAddr("udp", address)
@@ -161,6 +169,8 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	conn, err := net.DialUDP("udp", nil, remote)
 	if err != nil { return nil, err }
 	defer conn.Close()
+
+	path := c.pathFor(remote.String())
 
 	budget := c.config.RequestTimeout
 	if deadline, ok := ctx.Deadline(); ok {
@@ -174,17 +184,21 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	session, err := randomUint64()
 	if err != nil { return nil, err }
 
+	// Discover a conservative path datagram size before sending application data.
+	mtu := path.discoverMTU(ctx, conn, c.config, time.Now().Add(min(budget, 2*c.config.RetryInterval)))
 	frame, err := EncodeFrame(Frame{Kind: kindRequest, RequestID: requestID, OperationID: operationID, Major: major, Minor: minor, DeadlineMillis: durationMillis(budget), Payload: payload}, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
-	octets, err := encodeOCTET(frame, c.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
+	octets, err := encodeOCTET(frame, mtu-datagramHeaderSize-octetHeaderSize-secureOverhead(c.config.PreSharedKey))
 	if err != nil { return nil, err }
 	wirePayload := octets
 	if len(c.config.PreSharedKey) == 32 {
 		wirePayload, err = sealSecurePayload(c.config.PreSharedKey, session, 1, false, octets)
 		if err != nil { return nil, err }
 	}
-	packet, err := encodeDatagram(session, 1, wirePayload, c.config.MaxDatagramBytes)
+	packet, err := encodeDatagram(session, 1, wirePayload, mtu)
 	if err != nil { return nil, err }
+	requestPathID, err := path.reserveSend(ctx,len(packet))
+	if err != nil { return nil,err }
 
 	deadline := time.Now().Add(budget)
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) { deadline = parentDeadline }
@@ -202,20 +216,20 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 			attemptDeadline = now.Add(c.config.RetryInterval)
 			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
 		}
-		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
+		if err := conn.SetDeadline(attemptDeadline); err != nil { path.loss(requestPathID); return nil, err }
 		if sendAttempt {
-			if _, err := conn.Write(packet); err != nil { return nil, err }
+			if _, err := conn.Write(packet); err != nil { path.loss(requestPathID); return nil, err }
 		}
 		n, err = conn.Read(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() { attempt++; continue }
+			if ne, ok := err.(net.Error); ok && ne.Timeout() { attempt++; if attempt > c.config.MaxRetries || !options.RetrySafe { path.loss(requestPathID) }; continue }
 			return nil, err
 		}
 		envelope, err = decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
 		if err != nil || envelope.session != session || envelope.sequence != 2 { continue }
 		wirePayload = envelope.payload
 		if len(c.config.PreSharedKey) == 32 {
-			wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 2, true, wirePayload)
+			wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, envelope.sequence, true, wirePayload)
 			if err != nil { continue }
 		}
 		if bytes.HasPrefix(wirePayload, []byte("ACK1")) { continue }
@@ -226,12 +240,14 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	response, err := DecodeFrame(rpcWire, c.config.MaxPayloadBytes)
 	if err != nil { return nil, err }
 	if response.RequestID != requestID { return nil, ErrMalformedFrame }
+	// The response proves the request reached the peer; release its in-flight budget.
+	path.ack(requestPathID)	
 	// ACK the response packet so the server can stop its bounded retransmission timer.
-	ackWire, err := (AckFrame{LargestAcked: 2, Ranges: []AckRange{{First: 2, Last: 2}}}).Encode()
+	ackWire, err := (AckFrame{LargestAcked: envelope.sequence, Ranges: []AckRange{{First: envelope.sequence, Last: envelope.sequence}}}).Encode()
 	if err == nil {
-		if len(c.config.PreSharedKey) == 32 { ackWire, err = sealSecurePayload(c.config.PreSharedKey, session, 2, false, ackWire) }
+		if len(c.config.PreSharedKey) == 32 { ackWire, err = sealSecurePayload(c.config.PreSharedKey, session, envelope.sequence, false, ackWire) }
 		if err == nil {
-			if ackPacket, encodeErr := encodeDatagram(session, 2, ackWire, c.config.MaxDatagramBytes); encodeErr == nil { _, _ = conn.Write(ackPacket) }
+			if ackPacket, encodeErr := encodeDatagram(session, envelope.sequence, ackWire, mtu); encodeErr == nil { _, _ = conn.Write(ackPacket) }
 		}
 	}
 	switch response.Kind {
@@ -250,7 +266,7 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 type replayKey struct { session uint64; sequence uint64 }
 type replayEntry struct { expires time.Time; response []byte }
 type pendingResponseKey struct { session uint64; peer string }
-type pendingResponse struct { packet []byte }
+type pendingResponse struct { packet []byte; path *udpPathState; congestionID uint64 }
 
 type UDPServer struct {
 	runtime *Runtime
@@ -262,6 +278,8 @@ type UDPServer struct {
 	replayBytes int
 	pendingMu sync.Mutex
 	pending map[pendingResponseKey]pendingResponse
+	pathsMu sync.Mutex
+	paths map[string]*udpPathState
 	workers chan struct{}
 	wg sync.WaitGroup
 }
@@ -269,7 +287,7 @@ type UDPServer struct {
 func NewUDPServer(runtime *Runtime, config UDPConfig) (*UDPServer, error) {
 	if runtime == nil { return nil, errors.New("callgraph: runtime is required") }
 	if err := config.validate(); err != nil { return nil, err }
-	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), pending: make(map[pendingResponseKey]pendingResponse), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
+	return &UDPServer{runtime: runtime, config: config, operations: make(map[uint32]Descriptor), replay: make(map[replayKey]replayEntry), pending: make(map[pendingResponseKey]pendingResponse), paths: make(map[string]*udpPathState), workers: make(chan struct{}, config.MaxConcurrentRequests)}, nil
 }
 
 func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handler Handler) error {
@@ -281,6 +299,16 @@ func (s *UDPServer) RegisterOperation(d Descriptor, authorize Authorizer, handle
 	s.operations[d.ID] = d
 	return nil
 }
+
+func (s *UDPServer) pathFor(peer *net.UDPAddr) *udpPathState {
+	key := peerPathKey(peer)
+	s.pathsMu.Lock()
+	defer s.pathsMu.Unlock()
+	path := s.paths[key]
+	if path == nil { path = newUDPPathState(s.config.MaxDatagramBytes); s.paths[key] = path }
+	return path
+}
+
 
 // Serve runs until ctx is cancelled. It polls the socket so cancellation is bounded.
 func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
@@ -305,9 +333,11 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			plainPayload, decodeErr = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, envelope.payload)
 			if decodeErr != nil { continue }
 		} else if s.config.RequireEncryption { continue }
+		path := s.pathFor(peer)
+		if len(plainPayload)>=4 && string(plainPayload[:4])=="MTP1" { s.handleMTUProbe(conn,peer,packet,envelope,plainPayload,path); continue }
 		if bytes.HasPrefix(plainPayload, []byte("ACK1")) {
 			ack, ackErr := DecodeACK(plainPayload)
-			if ackErr == nil && envelope.sequence == 2 { s.acknowledgeResponse(peer, envelope.session, ack) }
+			if ackErr == nil { s.acknowledgeResponse(peer, envelope.session, ack) }
 			continue
 		}
 		accepted, cached := s.acceptReplay(envelope)
@@ -323,7 +353,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				defer func(){ <-s.workers }()
 				if response := s.handlePacket(ctx, packet); len(response) > 0 {
 					s.storeReplayResponse(requestEnvelope, response)
-					s.transmitResponse(ctx, conn, peer, requestEnvelope.session, response)
+					s.transmitResponse(ctx, conn, peer, requestEnvelope.session, response, s.pathFor(peer))
 				}
 			}(peer, packet, envelope)
 		default:
@@ -338,10 +368,10 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 // transmitResponse retains a bounded response until the peer acknowledges packet 2.
 // The worker slot remains occupied during this finite retry window, preserving the
 // server's existing concurrency bound.
-func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, session uint64, packet []byte) {
+func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, peer *net.UDPAddr, session uint64, packet []byte, path *udpPathState) {
 	key := pendingResponseKey{session: session, peer: peer.String()}
 	s.pendingMu.Lock()
-	s.pending[key] = pendingResponse{packet: append([]byte(nil), packet...)}
+	s.pending[key] = pendingResponse{packet: append([]byte(nil), packet...), path:path}
 	s.pendingMu.Unlock()
 	defer func() {
 		s.pendingMu.Lock()
@@ -350,13 +380,16 @@ func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, pee
 	}()
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		if ctx.Err() != nil { return }
-		if _, err := conn.WriteToUDP(packet, peer); err != nil { return }
+		id, reserveErr := path.reserveSend(ctx,len(packet)); if reserveErr != nil { return }
+		s.pendingMu.Lock(); entry:=s.pending[key]; entry.congestionID=id; s.pending[key]=entry; s.pendingMu.Unlock()
+		if _, err := conn.WriteToUDP(packet, peer); err != nil { path.loss(id); return }
 		if attempt == s.config.MaxRetries { return }
 		timer := time.NewTimer(s.config.RetryInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop(); return
 		case <-timer.C:
+			path.loss(id)
 		}
 		s.pendingMu.Lock()
 		_, waiting := s.pending[key]
@@ -373,8 +406,10 @@ func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr, session uint64, ack A
 	if !covered { return }
 	key := pendingResponseKey{session: session, peer: peer.String()}
 	s.pendingMu.Lock()
+	entry,exists:=s.pending[key]
 	delete(s.pending, key)
 	s.pendingMu.Unlock()
+	if exists && entry.path!=nil && entry.congestionID!=0 { entry.path.ack(entry.congestionID) }
 }
 
 func (s *UDPServer) acceptReplay(envelope datagramEnvelope) (bool, []byte) {
