@@ -199,6 +199,8 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	if err != nil { return nil, err }
 	requestPathID, err := path.reserveSend(ctx,len(packet))
 	if err != nil { return nil,err }
+	requestAcknowledged := false
+	defer func(){ if !requestAcknowledged { path.loss(requestPathID) } }()
 
 	deadline := time.Now().Add(budget)
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) { deadline = parentDeadline }
@@ -375,15 +377,16 @@ func (s *UDPServer) transmitResponse(ctx context.Context, conn *net.UDPConn, pee
 	s.pendingMu.Unlock()
 	defer func() {
 		s.pendingMu.Lock()
+		entry, exists := s.pending[key]
 		delete(s.pending, key)
 		s.pendingMu.Unlock()
+		if exists && entry.path != nil && entry.congestionID != 0 { entry.path.loss(entry.congestionID) }
 	}()
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		if ctx.Err() != nil { return }
 		id, reserveErr := path.reserveSend(ctx,len(packet)); if reserveErr != nil { return }
 		s.pendingMu.Lock(); entry:=s.pending[key]; entry.congestionID=id; s.pending[key]=entry; s.pendingMu.Unlock()
 		if _, err := conn.WriteToUDP(packet, peer); err != nil { path.loss(id); return }
-		if attempt == s.config.MaxRetries { return }
 		timer := time.NewTimer(path.rto())
 		select {
 		case <-ctx.Done():
