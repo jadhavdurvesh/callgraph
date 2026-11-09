@@ -141,6 +141,8 @@ func openSecurePayload(key []byte, session uint64, sequence uint64, response boo
 }
 
 // UDPClient sends CALLGRAPH frames inside OCTET frames inside DATAGRAM envelopes.
+// CallOptions preserves the opt-in whole-call retry setting for API compatibility.
+// Fragment retransmission is always enabled and is deduplicated by the message ID.
 type CallOptions struct { RetrySafe bool }
 type UDPClient struct { config UDPConfig; pathsMu sync.Mutex; paths map[string]*udpPathState }
 
@@ -153,8 +155,9 @@ func (c *UDPClient) Call(ctx context.Context, address string, operationID uint32
 	return c.CallWithOptions(ctx, address, operationID, major, minor, payload, CallOptions{})
 }
 
-// CallWithOptions retransmits only when the caller explicitly declares the
-// operation retry-safe. Non-idempotent operations must not be retried blindly.
+// CallWithOptions retains the legacy options surface. The current transport only
+// retransmits individual fragments; it does not automatically repeat a whole RPC.
+// Fragment retries are safe because the receiver reassembles and deduplicates by message ID.
 func (c *UDPClient) pathFor(address string) *udpPathState {
 	c.pathsMu.Lock()
 	defer c.pathsMu.Unlock()
@@ -164,6 +167,7 @@ func (c *UDPClient) pathFor(address string) *udpPathState {
 }
 
 func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operationID uint32, major, minor uint16, payload []byte, options CallOptions) ([]byte, error) {
+	_ = options // Reserved for future whole-call retry policy.
 	if len(payload)>c.config.MaxPayloadBytes{return nil,ErrPayloadTooLarge}
 	remote,err:=net.ResolveUDPAddr("udp",address);if err!=nil{return nil,err}
 	conn,err:=net.DialUDP("udp",nil,remote);if err!=nil{return nil,err};defer conn.Close()
