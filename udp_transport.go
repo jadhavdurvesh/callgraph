@@ -276,13 +276,10 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 			accepted,cached,known:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
+				if !known { continue } // replay table is full; fail closed
 				if len(cached)==0 {
-					// The original execution may still be running, or the replay
-					// cache may be full. Do not ACK completion until a response is
-					// cached; the sender will retry this final fragment.
-					continue
-				}
-				if len(cached)==0 {
+					// The original request is still being executed. ACK the
+					// duplicate fragment; its original response is in flight.
 					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					continue
 				}
