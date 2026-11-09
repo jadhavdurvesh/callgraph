@@ -285,10 +285,10 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				select {case s.workers<-struct{}{}:
 					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					s.wg.Add(1)
-					go func(peer *net.UDPAddr,session uint64,response []byte,path *udpPathState){
+					go func(peer *net.UDPAddr,session,messageID uint64,response []byte,path *udpPathState){
 						defer s.wg.Done();defer func(){<-s.workers}()
-						s.transmitMessage(ctx,conn,peer,session,response,path)
-					}(peer,envelope.session,cached,path)
+						s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
+					}(peer,envelope.session,fragment.messageID,cached,path)
 				default:}
 				continue
 			}
@@ -305,7 +305,7 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 				requestPacket,encodeErr:=encodeDatagram(session,assembledRequestSequence,wire,s.config.MaxDatagramBytes);if encodeErr!=nil{return}
 				response:=s.handlePacket(ctx,requestPacket);if len(response)==0{return}
 				s.storeReplayResponse(session,messageID,response)
-				s.transmitMessage(ctx,conn,peer,session,response,path)
+				s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
 			}(peer,envelope.session,fragment.messageID,assembled,path)
 		default:
 			// Do not acknowledge the final fragment while execution capacity is
