@@ -6,7 +6,7 @@ Status: experimental implementation profile, version 1
 
 FRG1 carries one bounded CALLGRAPH/OCTET message across multiple DATAGRAM UDP envelopes when the encoded message exceeds the current path datagram budget. Reassembly occurs before CALLGRAPH frame decoding and operation dispatch.
 
-This profile is stop-and-wait: the sender transmits one fragment and waits for its ACK before advancing to the next fragment. It does not define streaming, a sliding window, or arbitrary multiplexing of multiple messages within one session.
+This profile uses a bounded selective-repeat window. A sender may have up to eight fragments in flight at once, subject to the path congestion window and pacing. Each fragment is independently acknowledged and retransmitted on timeout. The current profile does not batch ACK ranges or define streaming, arbitrary multiplexing of multiple messages within one session, or cross-message fairness.
 
 ## Encapsulation
 
@@ -53,7 +53,7 @@ The response uses the request's message ID. Cached response retransmission there
 
 ## ACK1 semantics
 
-An ACK1 frame acknowledges the data sequence in its `LargestAcked` field and bounded ACK ranges. In this profile, each fragment is acknowledged independently with a single-fragment range. The ACK envelope sequence is derived from the data fragment index using the corresponding ACK sequence base.
+An ACK1 frame acknowledges the data sequence in its `LargestAcked` field and bounded ACK ranges. In this profile, each fragment is acknowledged independently with a single-fragment range. Multiple ACKs may arrive in any order while several fragments are in flight. The ACK envelope sequence is derived from the data fragment index using the corresponding ACK sequence base.
 
 The receiver sends an ACK after validating and recording a fragment. Duplicate fragments are acknowledged again. A sender retransmits an unacknowledged fragment using the current per-path retransmission timeout, up to `MaxRetries`.
 
@@ -90,4 +90,4 @@ Without PSK mode, the profile provides no cryptographic fragment integrity or pe
 
 ## Known limitations
 
-The implementation uses stop-and-wait fragment delivery. It does not yet define sliding-window flow control, streaming/backpressure, selective-repeat batching, ECN, congestion fairness across competing flows, multipath, negotiated key rotation, forward secrecy, certificate identity, or a formal threat model. The profile is experimental and must not be used as the sole safety channel for emergency-stop or hard real-time control.
+The implementation uses a bounded eight-fragment selective-repeat window with independent per-fragment ACKs. It does not yet define ACK range batching, streaming/backpressure, ECN, congestion fairness across competing flows, multipath, negotiated key rotation, forward secrecy, certificate identity, or a formal threat model. The profile is experimental and must not be used as the sole safety channel for emergency-stop or hard real-time control.
