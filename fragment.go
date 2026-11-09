@@ -81,6 +81,7 @@ type fragmentAssembly struct {
 	count int
 	chunkSize int
 	bytesReceived int
+	complete bool
 	expires time.Time
 }
 
@@ -129,6 +130,7 @@ func (r *fragmentReassembler) Add(key string,f messageFragment,now time.Time) ([
 	start,end:=int(f.offset),int(f.offset)+len(f.data)
 	if m.received[int(f.index)] {
 		for i,b:=range f.data { if m.data[start+i]!=b { r.usedBytes-=len(m.data);delete(r.messages,key);return nil,false,ErrMalformedFragment } }
+		if m.complete { return append([]byte(nil),m.data...),true,nil }
 		return nil,false,nil
 	}
 	for i,received:=range m.received {
@@ -142,10 +144,8 @@ func (r *fragmentReassembler) Add(key string,f messageFragment,now time.Time) ([
 	m.bytesReceived+=len(f.data)
 	for _,received:=range m.received { if !received { return nil,false,nil } }
 	if m.bytesReceived!=len(m.data) { r.usedBytes-=len(m.data);delete(r.messages,key);return nil,false,ErrMalformedFragment }
-	result:=append([]byte(nil),m.data...)
-	r.usedBytes-=len(m.data)
-	delete(r.messages,key)
-	return result,true,nil
+	m.complete=true
+	return append([]byte(nil),m.data...),true,nil
 }
 
 func (r *fragmentReassembler) Stats() (messages,bytes int) {
