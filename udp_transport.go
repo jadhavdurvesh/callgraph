@@ -343,35 +343,31 @@ func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr,session,ackSequence ui
 	}
 }
 
-func (s *UDPServer) acceptReplay(envelope datagramEnvelope) (bool, []byte) {
-	now := time.Now()
-	key := replayKey{session: envelope.session, sequence: envelope.sequence}
-	s.replayMu.Lock()
-	defer s.replayMu.Unlock()
-	if entry, exists := s.replay[key]; exists {
-		if now.Before(entry.expires) { return false, append([]byte(nil), entry.response...) }
-		s.replayBytes -= len(entry.response)
-		delete(s.replay, key)
+func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte) {
+	now:=time.Now()
+	key:=replayKey{session:session,messageID:messageID}
+	s.replayMu.Lock();defer s.replayMu.Unlock()
+	if entry,exists:=s.replay[key];exists {
+		if now.Before(entry.expires){return false,append([]byte(nil),entry.response...)}
+		s.replayBytes-=len(entry.response);delete(s.replay,key)
 	}
-	if len(s.replay) >= s.config.MaxReplayEntries {
-		for k, entry := range s.replay { if !now.Before(entry.expires) { s.replayBytes -= len(entry.response); delete(s.replay, k) } }
-		if len(s.replay) >= s.config.MaxReplayEntries { return false, nil }
+	if len(s.replay)>=s.config.MaxReplayEntries {
+		for k,entry:=range s.replay {if !now.Before(entry.expires){s.replayBytes-=len(entry.response);delete(s.replay,k)}}
+		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil}
 	}
-	s.replay[key] = replayEntry{expires: now.Add(2 * s.config.RequestTimeout)}
-	return true, nil
+	s.replay[key]=replayEntry{expires:now.Add(2*s.config.RequestTimeout)}
+	return true,nil
 }
 
-func (s *UDPServer) storeReplayResponse(envelope datagramEnvelope, response []byte) {
-	key := replayKey{session: envelope.session, sequence: envelope.sequence}
-	s.replayMu.Lock()
-	defer s.replayMu.Unlock()
-	entry, ok := s.replay[key]
-	if !ok { return }
-	if len(response) > s.config.MaxReplayBytes-s.replayBytes+len(entry.response) { return }
-	s.replayBytes -= len(entry.response)
-	entry.response = append([]byte(nil), response...)
-	s.replayBytes += len(entry.response)
-	s.replay[key] = entry
+func (s *UDPServer) storeReplayResponse(session,messageID uint64,response []byte) {
+	key:=replayKey{session:session,messageID:messageID}
+	s.replayMu.Lock();defer s.replayMu.Unlock()
+	entry,ok:=s.replay[key];if !ok{return}
+	if len(response)>s.config.MaxReplayBytes-s.replayBytes+len(entry.response){return}
+	s.replayBytes-=len(entry.response)
+	entry.response=append([]byte(nil),response...)
+	s.replayBytes+=len(entry.response)
+	s.replay[key]=entry
 }
 
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
@@ -415,16 +411,9 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 	}
 	responseFrame, err := EncodeFrame(Frame{Kind: kind, RequestID: request.RequestID, OperationID: request.OperationID, Major: request.Major, Minor: request.Minor, Payload: result}, s.config.MaxPayloadBytes)
 	if err != nil { return nil }
-	octets, err := encodeOCTET(responseFrame, s.config.MaxDatagramBytes-datagramHeaderSize-octetHeaderSize-secureOverhead(s.config.PreSharedKey))
+	octets, err := encodeOCTET(responseFrame, s.config.MaxPayloadBytes+FrameHeaderSize)
 	if err != nil { return nil }
-	wirePayload = octets
-	if len(s.config.PreSharedKey) == 32 {
-		wirePayload, err = sealSecurePayload(s.config.PreSharedKey, envelope.session, 2, true, octets)
-		if err != nil { return nil }
-	}
-	response, err := encodeDatagram(envelope.session, 2, wirePayload, s.config.MaxDatagramBytes)
-	if err != nil { return nil }
-	return response
+	return octets
 }
 
 func secureOverhead(key []byte) int { if len(key)==32 { return 20 }; return 0 }
