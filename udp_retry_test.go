@@ -43,7 +43,7 @@ func TestUDPClientRetriesWithoutReexecutingOperation(t *testing.T) {
 			n,peer,e:=proxy.ReadFromUDP(buf); if e!=nil {proxyDone<-e;return}
 			packet:=append([]byte(nil),buf[:n]...)
 			env,decodeErr:=decodeDatagram(packet,65507); if decodeErr!=nil {proxyDone<-decodeErr;return}
-			if env.sequence==3 { // forward MTU probes and their challenge responses transparently
+			if env.sequence==mtuProbeRequestSequence { // forward MTU probes and their challenge responses transparently
 				if _,e=upstream.Write(packet);e!=nil{proxyDone<-e;return}
 				n,e=upstream.Read(buf);if e!=nil{proxyDone<-e;return}
 				if _,e=proxy.WriteToUDP(buf[:n],peer);e!=nil{proxyDone<-e;return}
