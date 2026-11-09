@@ -150,7 +150,7 @@ func (p *udpPathState) discoverMTU(ctx context.Context, conn *net.UDPConn, cfg U
 		probeID,err:=randomUint64(); if err!=nil {break}
 		plain:=make([]byte,size-datagramHeaderSize-secureOverhead(cfg.PreSharedKey))
 		copy(plain[:4],"MTP1"); binary.BigEndian.PutUint64(plain[4:12],probeID); binary.BigEndian.PutUint32(plain[12:16],uint32(size))
-		for i:=mtuProbeHeaderSize;i<len(plain);i++ {plain[i]=byte((i*31+probeID)&0xff)}
+		for i:=mtuProbeHeaderSize;i<len(plain);i++ {plain[i]=byte((uint64(i)*31+probeID)&0xff)}
 		wire:=plain
 		if len(cfg.PreSharedKey)==32 {wire,err=sealSecurePayload(cfg.PreSharedKey,session,3,false,plain);if err!=nil{break}}
 		packet,err:=encodeDatagram(session,3,wire,size);if err!=nil{break}
