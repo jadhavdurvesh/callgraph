@@ -65,6 +65,7 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 			}
 			if envelope.sequence<requestAckSequenceBase||envelope.sequence>=requestAckSequenceBase+maxMessageFragments{continue}
 			index:=envelope.sequence-requestAckSequenceBase
+			if index>=uint64(len(jobs)){continue}
 			ackPayload:=envelope.payload
 			if len(c.config.PreSharedKey)==32 {ackPayload,e=openSecurePayload(c.config.PreSharedKey,session,envelope.sequence,true,ackPayload);if e!=nil{continue}}
 			ack,e:=DecodeACK(ackPayload)
@@ -109,7 +110,8 @@ func (c *UDPClient) sendRequestFragments(ctx context.Context,conn *net.UDPConn,p
 					current,ok:=outstanding[job.sequence]
 					if ok&&current==id{delete(outstanding,job.sequence)}
 					mu.Unlock()
-					if ok&&current==id{path.loss(id)}
+					if !ok { result=nil; break }
+					if current==id{path.loss(id)}
 					if attempt==c.config.MaxRetries{result=errors.New("callgraph: request fragment acknowledgement limit reached")}
 				case <-sendCtx.Done():
 					if !timer.Stop(){select{case <-timer.C:default:}}
