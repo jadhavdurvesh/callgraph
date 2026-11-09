@@ -17,7 +17,8 @@
 - [x] Bounded reassembly memory, assembly count, fragment count and expiry.
 - [x] Plaintext and AES-GCM large-message integration tests, plus response-fragment loss/retransmission coverage.
 - [ ] Cancellation propagation beyond the server-side handler context.
-- [ ] Sliding-window delivery, streaming/backpressure and fair scheduling.
+- [x] Bounded eight-fragment selective-repeat delivery with independent ACK processing.
+- [ ] ACK range batching, streaming/backpressure and fair scheduling.
 - [ ] ECN and multi-path fairness tests.
 - [ ] Key rotation negotiation, forward secrecy and certificate identity.
 - [ ] Fuzzing, adversarial network tests, interoperability vectors and benchmarks.
