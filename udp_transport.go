@@ -273,18 +273,17 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 		}
 		select {
 		case s.workers<-struct{}{}:
-			accepted,cached,known,retransmit:=s.acceptReplay(envelope.session,fragment.messageID)
+			accepted,cached,known,retransmit,busy:=s.acceptReplay(envelope.session,fragment.messageID)
 			if !accepted {
 				<-s.workers
 				if !known { continue } // replay table is full; fail closed
-				if !retransmit {
-					if len(cached)==0 {
-						// The original request is still executing. ACK the
-						// duplicate fragment; its response will follow.
-					}
+				if busy {
+					// The original handler or response sender still owns this
+					// message ID. ACK the duplicate; do not create a second sender.
 					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					continue
 				}
+				if !retransmit { continue }
 				select {case s.workers<-struct{}{}:
 					_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
 					s.wg.Add(1)
@@ -293,7 +292,9 @@ func (s *UDPServer) Serve(ctx context.Context, conn *net.UDPConn) error {
 						s.transmitMessage(ctx,conn,peer,session,messageID,response,path)
 						s.finishReplayTransmission(session,messageID)
 					}(peer,envelope.session,fragment.messageID,cached,path)
-				default:}
+				default:
+					s.finishReplayTransmission(envelope.session,fragment.messageID)
+				}
 				continue
 			}
 			_ = writeFragmentACK(conn,envelope.session,envelope.sequence,requestAckSequenceBase+uint64(fragment.index),true,path.currentMTU(),s.config.PreSharedKey,peer)
@@ -342,29 +343,29 @@ func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr,session,ackSequence ui
 	}
 }
 
-func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte,bool,bool) {
+func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte,bool,bool,bool) {
 	now:=time.Now()
 	key:=replayKey{session:session,messageID:messageID}
 	s.replayMu.Lock();defer s.replayMu.Unlock()
 	if entry,exists:=s.replay[key];exists {
 		if now.Before(entry.expires) {
 			cached:=append([]byte(nil),entry.response...)
-			if entry.inFlight { return false,cached,true,false }
+			if entry.inFlight { return false,cached,true,false,true }
 			if len(cached)>0 {
 				entry.inFlight=true
 				s.replay[key]=entry
-				return false,cached,true,true
+				return false,cached,true,true,false
 			}
-			return false,nil,true,false
+			return false,nil,true,false,false
 		}
 		s.replayBytes-=len(entry.response);delete(s.replay,key)
 	}
 	if len(s.replay)>=s.config.MaxReplayEntries {
 		for k,entry:=range s.replay {if !now.Before(entry.expires){s.replayBytes-=len(entry.response);delete(s.replay,k)}}
-		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil,false,false}
+		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil,false,false,false}
 	}
 	s.replay[key]=replayEntry{expires:now.Add(2*s.config.RequestTimeout),inFlight:true}
-	return true,nil,false,false
+	return true,nil,false,false,false
 }
 
 func (s *UDPServer) storeReplayResponse(session,messageID uint64,response []byte) {
