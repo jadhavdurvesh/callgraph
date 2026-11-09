@@ -57,13 +57,8 @@ func DefaultUDPConfig() UDPConfig {
 }
 
 func (c UDPConfig) validate() error {
-	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+octetHeaderSize+FrameHeaderSize+1 || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxReplayBytes <= 0 || c.MaxReassemblyBytes < c.MaxPayloadBytes+FrameHeaderSize+octetHeaderSize || c.MaxReassemblyMessages <= 0 || c.ReassemblyTimeout <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {
+	if c.MaxPayloadBytes <= 0 || c.MaxDatagramBytes < datagramHeaderSize+fragmentHeaderSize+1+secureOverhead(c.PreSharedKey) || c.MaxDatagramBytes > 65_507 || c.RequestTimeout <= 0 || c.ReadPollInterval <= 0 || c.MaxConcurrentRequests <= 0 || c.MaxReplayEntries <= 0 || c.MaxReplayBytes <= 0 || c.MaxReassemblyBytes < c.MaxPayloadBytes+FrameHeaderSize+octetHeaderSize || c.MaxReassemblyMessages <= 0 || c.ReassemblyTimeout <= 0 || c.MaxRetries < 0 || c.RetryInterval <= 0 || (len(c.PreSharedKey) != 0 && len(c.PreSharedKey) != 32) || (c.RequireEncryption && len(c.PreSharedKey) != 32) {
 		return errors.New("callgraph: invalid UDP transport limits")
-	}
-	overhead := datagramHeaderSize + octetHeaderSize + FrameHeaderSize
-	if len(c.PreSharedKey) == 32 { overhead += 20 }
-	if c.MaxPayloadBytes+overhead > c.MaxDatagramBytes {
-		return errors.New("callgraph: payload limit exceeds datagram limit")
 	}
 	return nil
 }
@@ -377,7 +372,7 @@ func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
 		wirePayload, err = openSecurePayload(s.config.PreSharedKey, envelope.session, envelope.sequence, false, wirePayload)
 		if err != nil { return nil }
 	} else if s.config.RequireEncryption { return nil }
-	rpcWire, err := decodeOCTET(wirePayload, s.config.MaxDatagramBytes)
+	rpcWire, err := decodeOCTET(wirePayload, s.config.MaxPayloadBytes+FrameHeaderSize)
 	if err != nil { return nil }
 	request, err := DecodeFrame(rpcWire, s.config.MaxPayloadBytes)
 	if err != nil || request.Kind != kindRequest || request.OperationID == 0 { return nil }
