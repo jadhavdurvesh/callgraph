@@ -12,6 +12,7 @@ type StreamReader struct {
 	done chan struct{}
 	stop context.CancelFunc
 	once sync.Once
+	doneOnce *sync.Once
 }
 
 // StreamWriter is the write half of a bounded, backpressured byte stream.
@@ -20,6 +21,7 @@ type StreamWriter struct {
 	done chan struct{}
 	stop context.CancelFunc
 	once sync.Once
+	doneOnce *sync.Once
 }
 
 // NewStreamPipe creates a transport-independent full-duplex-independent
@@ -31,8 +33,9 @@ func NewStreamPipe(parent context.Context) (*StreamReader, *StreamWriter) {
 	ctx, cancel := context.WithCancel(parent)
 	reader, writer := io.Pipe()
 	done := make(chan struct{})
-	r := &StreamReader{pipe:reader,done:done,stop:cancel}
-	w := &StreamWriter{pipe:writer,done:done,stop:cancel}
+	doneOnce := &sync.Once{}
+	r := &StreamReader{pipe:reader,done:done,stop:cancel,doneOnce:doneOnce}
+	w := &StreamWriter{pipe:writer,done:done,stop:cancel,doneOnce:doneOnce}
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -52,7 +55,7 @@ func (r *StreamReader) Read(p []byte) (int,error) {
 func (r *StreamReader) Close() error {
 	if r==nil||r.pipe==nil{return nil}
 	var err error
-	r.once.Do(func(){err=r.pipe.Close();r.stop();close(r.done)})
+	r.once.Do(func(){err=r.pipe.Close();r.stop();r.doneOnce.Do(func(){close(r.done)})})
 	return err
 }
 
@@ -71,7 +74,7 @@ func (w *StreamWriter) Write(p []byte) (int,error) {
 func (w *StreamWriter) Close() error {
 	if w==nil||w.pipe==nil{return nil}
 	var err error
-	w.once.Do(func(){err=w.pipe.Close();w.stop();close(w.done)})
+	w.once.Do(func(){err=w.pipe.Close();w.stop();w.doneOnce.Do(func(){close(w.done)})})
 	return err
 }
 
