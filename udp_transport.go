@@ -184,7 +184,7 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	if err!=nil{return nil,err}
 	octets,err:=encodeOCTET(frame,c.config.MaxPayloadBytes+FrameHeaderSize);if err!=nil{return nil,err}
 	if err=c.sendRequestFragments(ctx,conn,path,session,mtu,octets,deadline);err!=nil{return nil,err}
-	responseWire,err:=c.receiveResponseFragments(ctx,conn,session,mtu);if err!=nil{return nil,err}
+	responseWire,err:=c.receiveResponseFragments(ctx,conn,session,mtu,deadline);if err!=nil{return nil,err}
 	rpcWire,err:=decodeOCTET(responseWire,c.config.MaxPayloadBytes+FrameHeaderSize);if err!=nil{return nil,err}
 	response,err:=DecodeFrame(rpcWire,c.config.MaxPayloadBytes);if err!=nil{return nil,err}
 	if response.RequestID!=requestID{return nil,ErrMalformedFrame}
