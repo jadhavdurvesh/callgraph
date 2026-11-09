@@ -190,34 +190,16 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) { deadline = parentDeadline }
 	buf := make([]byte, c.config.MaxDatagramBytes)
 	var n int
-	for attempt := 0; ; attempt++ {
+	var envelope datagramEnvelope
+	attempt := 0
+	for {
 		if err := ctx.Err(); err != nil { return nil, err }
 		now := time.Now()
 		if !now.Before(deadline) { return nil, context.DeadlineExceeded }
-		attemptDeadline := deadline
 		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
+		attemptDeadline := deadline
 		if sendAttempt {
 			attemptDeadline = now.Add(c.config.RetryInterval)
-			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
-		}
-		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
-		if sendAttempt {
-			if _, err := conn.Write(packet); err != nil { return nil, err }
-		}
-		n, err = conn.Read(buf)
-		if err == nil { break }
-		if ne, ok := err.(net.Error); !ok || !ne.Timeout() { return nil, err }
-		// Once the retry budget is spent, wait for the original in-flight
-		// response until the overall request deadline without sending again.
-	}
-	var envelope datagramEnvelope
-	for {
-		if err := ctx.Err(); err != nil { return nil, err }
-		if !time.Now().Before(deadline) { return nil, context.DeadlineExceeded }
-		attemptDeadline := deadline
-		sendAttempt := attempt == 0 || (options.RetrySafe && attempt <= c.config.MaxRetries)
-		if sendAttempt {
-			attemptDeadline = time.Now().Add(c.config.RetryInterval)
 			if attemptDeadline.After(deadline) { attemptDeadline = deadline }
 		}
 		if err := conn.SetDeadline(attemptDeadline); err != nil { return nil, err }
@@ -230,8 +212,7 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 			return nil, err
 		}
 		envelope, err = decodeDatagram(buf[:n], c.config.MaxDatagramBytes)
-		if err != nil || envelope.session != session { continue }
-		if envelope.sequence != 2 { continue }
+		if err != nil || envelope.session != session || envelope.sequence != 2 { continue }
 		wirePayload = envelope.payload
 		if len(c.config.PreSharedKey) == 32 {
 			wirePayload, err = openSecurePayload(c.config.PreSharedKey, session, 2, true, wirePayload)
