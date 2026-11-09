@@ -195,7 +195,7 @@ func (c *UDPClient) CallWithOptions(ctx context.Context, address string, operati
 
 // UDPServer dispatches registered CALLGRAPH operations over the shared wire profiles.
 type replayKey struct { session uint64; messageID uint64 }
-type replayEntry struct { expires time.Time; response []byte }
+type replayEntry struct { expires time.Time; response []byte; inFlight bool }
 type pendingResponseKey struct { session uint64; peer string; sequence uint64 }
 type pendingResponse struct { packet []byte; path *udpPathState; congestionID uint64; done chan struct{} }
 
@@ -338,20 +338,29 @@ func (s *UDPServer) acknowledgeResponse(peer *net.UDPAddr,session,ackSequence ui
 	}
 }
 
-func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte,bool) {
+func (s *UDPServer) acceptReplay(session,messageID uint64) (bool,[]byte,bool,bool) {
 	now:=time.Now()
 	key:=replayKey{session:session,messageID:messageID}
 	s.replayMu.Lock();defer s.replayMu.Unlock()
 	if entry,exists:=s.replay[key];exists {
-		if now.Before(entry.expires){return false,append([]byte(nil),entry.response...),true}
+		if now.Before(entry.expires) {
+			cached:=append([]byte(nil),entry.response...)
+			if entry.inFlight { return false,cached,true,false }
+			if len(cached)>0 {
+				entry.inFlight=true
+				s.replay[key]=entry
+				return false,cached,true,true
+			}
+			return false,nil,true,false
+		}
 		s.replayBytes-=len(entry.response);delete(s.replay,key)
 	}
 	if len(s.replay)>=s.config.MaxReplayEntries {
 		for k,entry:=range s.replay {if !now.Before(entry.expires){s.replayBytes-=len(entry.response);delete(s.replay,k)}}
-		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil,false}
+		if len(s.replay)>=s.config.MaxReplayEntries{return false,nil,false,false}
 	}
-	s.replay[key]=replayEntry{expires:now.Add(2*s.config.RequestTimeout)}
-	return true,nil,false
+	s.replay[key]=replayEntry{expires:now.Add(2*s.config.RequestTimeout),inFlight:true}
+	return true,nil,false,false
 }
 
 func (s *UDPServer) storeReplayResponse(session,messageID uint64,response []byte) {
@@ -363,6 +372,14 @@ func (s *UDPServer) storeReplayResponse(session,messageID uint64,response []byte
 	entry.response=append([]byte(nil),response...)
 	s.replayBytes+=len(entry.response)
 	s.replay[key]=entry
+}
+
+func (s *UDPServer) finishReplayTransmission(session,messageID uint64) {
+	key:=replayKey{session:session,messageID:messageID}
+	s.replayMu.Lock()
+	entry,ok:=s.replay[key]
+	if ok { entry.inFlight=false; s.replay[key]=entry }
+	s.replayMu.Unlock()
 }
 
 func (s *UDPServer) handlePacket(parent context.Context, packet []byte) []byte {
